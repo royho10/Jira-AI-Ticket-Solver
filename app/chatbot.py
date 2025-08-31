@@ -5,6 +5,8 @@ from dotenv import load_dotenv
 from langchain.embeddings import OpenAIEmbeddings
 from langchain.vectorstores import Chroma
 from langchain.chat_models import ChatOpenAI
+from langchain.agents import Tool, initialize_agent, AgentType
+from langchain.memory import ConversationBufferMemory
 from utils.jira_client import JiraIssue, JiraClient
 from urllib.parse import urlparse
 import re
