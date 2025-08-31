@@ -1,0 +1,8 @@
+langchain>=0.0
+langchain_community
+chromadb
+openai
+streamlit
+requests
+tiktoken
+python-dotenv
