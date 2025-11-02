@@ -34,7 +34,14 @@ class JiraIndexer:
 
         comments = []
         if fields.get("comment") and fields["comment"].get("comments"):
-            comments = [c.get("body", "") for c in fields["comment"]["comments"]]
+            for comment in fields["comment"]["comments"]:
+                comment_body = comment.get("body", "")
+                if isinstance(comment_body, dict):
+                    # Extract text from ADF format
+                    comment_text = JiraIndexer._extract_text_from_adf(comment_body)
+                else:
+                    comment_text = str(comment_body)
+                comments.append(comment_text)
 
         raw = summary + "\n\n" + str(description) + "\n\n" + "\n\n".join(comments)
         chunks = TEXT_SPLITTER.split_text(raw)

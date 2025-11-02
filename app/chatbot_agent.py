@@ -305,28 +305,43 @@ agent = get_agent()
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+# Initialize analysis completion state
+if "analysis_completed" not in st.session_state:
+    st.session_state.analysis_completed = False
+
 # Display chat history
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# Chat input
-if prompt := st.chat_input("Ask me about Jira tickets or paste a ticket URL..."):
-    # Add user message to chat history
-    st.session_state.messages.append({"role": "user", "content": prompt})
+# Chat input - only show if analysis hasn't been completed
+if not st.session_state.analysis_completed:
+    if prompt := st.chat_input("Ask me about Jira tickets or paste a ticket URL..."):
+        # Add user message to chat history
+        st.session_state.messages.append({"role": "user", "content": prompt})
 
-    # Display user message
-    with st.chat_message("user"):
-        st.markdown(prompt)
+        # Display user message
+        with st.chat_message("user"):
+            st.markdown(prompt)
 
-    # Get agent response
-    with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-            response = agent.chat(prompt)
-        st.markdown(response)
+        # Get agent response
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking..."):
+                response = agent.chat(prompt)
+            st.markdown(response)
 
-    # Add assistant response to chat history
-    st.session_state.messages.append({"role": "assistant", "content": response})
+        # Add assistant response to chat history
+        st.session_state.messages.append({"role": "assistant", "content": response})
+
+        # Mark analysis as completed to disable further input
+        st.session_state.analysis_completed = True
+        # Force a rerun to immediately hide the chat input
+        st.rerun()
+else:
+    # Just show the message, no input field at all
+    st.info(
+        "✅ Analysis completed. Use 'Clear Chat History' button in the sidebar to analyze another ticket."
+    )
 
 # Sidebar with helpful information
 with st.sidebar:
@@ -347,4 +362,5 @@ with st.sidebar:
 
     if st.button("Clear Chat History"):
         st.session_state.messages = []
+        st.session_state.analysis_completed = False
         st.rerun()

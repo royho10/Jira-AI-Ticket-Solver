@@ -100,11 +100,21 @@ Use the ticket information from the similar tickets above. Replace [TICKET-KEY] 
 st.sidebar.markdown("### Usage")
 st.sidebar.markdown("Paste a Jira ticket URL or key, then press Analyze.")
 
-with st.form("ticket_form"):
-    url_or_key = st.text_input(
-        "Jira ticket URL or key (e.g., PROJ-123 or https://.../browse/PROJ-123)"
-    )
-    submitted = st.form_submit_button("Analyze")
+# Initialize session state for analysis completion
+if "analysis_completed" not in st.session_state:
+    st.session_state.analysis_completed = False
+
+# Only show form if analysis hasn't been completed
+if not st.session_state.analysis_completed:
+    with st.form("ticket_form"):
+        url_or_key = st.text_input(
+            "Jira ticket URL or key (e.g., PROJ-123 or https://.../browse/PROJ-123)"
+        )
+        submitted = st.form_submit_button("Analyze")
+else:
+    st.info("Analysis completed. Refresh the page to analyze another ticket.")
+    submitted = False
+    url_or_key = None
 if submitted and url_or_key:
     key = extract_key_from_url(url_or_key)
     try:
@@ -167,3 +177,6 @@ if submitted and url_or_key:
 
     # Display the LLM's structured response (now includes pre-formatted links)
     st.markdown(text)
+
+    # Mark analysis as completed to disable further input
+    st.session_state.analysis_completed = True
