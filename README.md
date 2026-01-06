@@ -58,6 +58,15 @@ Edit the `.env` file with your credentials:
 - `ATLASSIAN_EMAIL`: Your Jira email
 - `ATLASSIAN_API_TOKEN`: Your Jira API token
 
+### RAR File Support
+
+For processing RAR attachments, install the system-level `unrar` tool:
+
+**macOS:**
+```bash
+brew install rar
+```
+
 ## Usage
 
 ### 1. Index Your Jira Tickets

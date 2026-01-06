@@ -1,129 +1,181 @@
-import os
+from enum import Enum
+from typing import List
 
-from dotenv import load_dotenv
-from typing import Dict, List
-from langchain.schema import Document
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.embeddings import OpenAIEmbeddings
-from langchain_community.vectorstores import Chroma
+import weaviate
+import weaviate.classes as wvc
 
-from utils.jira_client import JiraClient
+from langchain_community.embeddings import OllamaEmbeddings
+from weaviate.classes.config import Property, DataType
+from weaviate.classes.data import DataObject
 
-load_dotenv()
-CHROMA_DIR = os.environ.get("CHROMA_DB_DIR", "./chroma_db")
+from utils.jira_client import JiraClient, JiraIssue
+from utils.jira_ticket_processing import JiraIssueLLMProcessor
 
-# LangChain/OpenAI embeddings wrapper
-EMBEDDINGS = OpenAIEmbeddings(
-    model="text-embedding-3-large", openai_api_key=os.environ["OPENAI_API_KEY"]
-)
+# -------------------------------
+# CONFIG
+# -------------------------------
+EMBEDDING_MODEL_NAME = "nomic-embed-text"
+VLM_MODEL_NAME = "qwen2.5vl:7b"
+LLM_MODEL_NAME = "llama3"
+MAX_LOG_FILES_TO_PROCESS = 20  # Max number of log files to process within a zip
+MAX_LINES_PER_LOG = 500  # hard cap on lines per log file to process
+CONTEXT_LINES_BEFORE_ERROR = 10  # Number of context lines to keep before errors in logs
+CONTEXT_LINES_AFTER_ERROR = 20  # Number of context lines to keep after errors in logs
+WEAVIATE_BATCH_SIZE = 100  # Number of objects to batch insert into Weaviate at once
 
-TEXT_SPLITTER = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=100)
+
+class ContentType(Enum):
+    SUMMARY = "summary"
+    DESCRIPTION = "description"
+    COMMENT = "comment"
+    ATTACHMENT_TEXT = "attachment_text"
+    ATTACHMENT_LOG = "attachment_log"
+    ATTACHMENT_IMAGE_TEXT = "attachment_image_text"
+
+
+class Componenets(Enum):
+    MANAGEMENT = "management"
+    AGGREGATOR = "aggregator"
+    AGENT = "agent"
 
 
 class JiraIndexer:
-    @staticmethod
-    def issue_to_docs(issue: Dict) -> List[Document]:
-        fields = issue.get("fields", {})
-        summary = fields.get("summary", "") or ""
-
-        # Handle description field - can be string or dict
-        description = fields.get("description") or ""
-        if isinstance(description, dict):
-            # Extract text from Atlassian Document Format
-            description = JiraIndexer._extract_text_from_adf(description)
-
-        comments = []
-        if fields.get("comment") and fields["comment"].get("comments"):
-            for comment in fields["comment"]["comments"]:
-                comment_body = comment.get("body", "")
-                if isinstance(comment_body, dict):
-                    # Extract text from ADF format
-                    comment_text = JiraIndexer._extract_text_from_adf(comment_body)
-                else:
-                    comment_text = str(comment_body)
-                comments.append(comment_text)
-
-        raw = summary + "\n\n" + str(description) + "\n\n" + "\n\n".join(comments)
-        chunks = TEXT_SPLITTER.split_text(raw)
-        docs = []
-        for i, chunk in enumerate(chunks):
-            meta = {
-                "ticket_key": issue.get("key"),
-                "summary": summary,
-                "status": fields.get("status", {}).get("name"),
-                "resolution": fields.get("resolution", {}).get("name")
-                if fields.get("resolution")
-                else None,
-                "chunk_index": i,
-            }
-            docs.append(Document(page_content=chunk, metadata=meta))
-        return docs
-
-    @staticmethod
-    def _extract_text_from_adf(adf_content):
-        """Extract plain text from Atlassian Document Format"""
-        if not isinstance(adf_content, dict):
-            return str(adf_content)
-
-        text_parts = []
-        content = adf_content.get("content", [])
-
-        for item in content:
-            if item.get("type") == "paragraph":
-                paragraph_content = item.get("content", [])
-                for text_item in paragraph_content:
-                    if text_item.get("type") == "text":
-                        text_parts.append(text_item.get("text", ""))
-
-        return " ".join(text_parts)
-
-    @classmethod
-    def index_all(cls, max_pages=5, page_size=50):
-        print(f"🗄️ Initializing Chroma database at: {CHROMA_DIR}")
-        chroma_collection = Chroma(
-            persist_directory=CHROMA_DIR,
-            embedding_function=EMBEDDINGS,
-            collection_name="jira_tickets",
+    def __init__(self):
+        self.db_client = weaviate.connect_to_local()
+        self.jira_client = JiraClient()
+        self.embedding_model = OllamaEmbeddings(
+            model=EMBEDDING_MODEL_NAME,
+            base_url="http://localhost:11434"  # Explicitly set Ollama URL
         )
 
-        print(f"📊 Current collection count: {chroma_collection._collection.count()}")
+        # Setup collection
+        self._setup_collection()
 
-        start_at = 0
-        total_docs_added = 0
+    def _setup_collection(self):
+        """Setup Weaviate collection schema if not exists"""
+        if self.db_client.collections.exists("JiraCollection"):
+            self.jira_collection = self.db_client.collections.get("JiraCollection")
+            return
+        else:
+            collection_name = "JiraTicketChunk"
 
-        for page in range(max_pages):
-            print(f"\n📄 Processing page {page + 1}/{max_pages}...")
-            issues = JiraClient().fetch_issues(max_results=page_size, start_at=start_at)
-            if not issues:
-                print("❌ No more issues found")
+            # Create new collection
+            self.jira_collection = self.db_client.collections.create(
+                name=collection_name,
+                properties=[
+                    # Core fields
+                    Property(name="issue_key", data_type=DataType.TEXT),
+                    Property(name="summary", data_type=DataType.TEXT),
+                    Property(name="clean_description", data_type=DataType.TEXT),
+                    Property(name="title", data_type=DataType.TEXT),
+
+                    # OPTIONAL FILTER FIELDS
+                    Property(name="issue_type", data_type=DataType.TEXT),
+                    Property(name="priority", data_type=DataType.TEXT),
+                    Property(name="project_key", data_type=DataType.TEXT),
+                    Property(name="labels", data_type=DataType.TEXT_ARRAY),
+                    Property(name="squad", data_type=DataType.TEXT),
+                    Property(name="components", data_type=DataType.TEXT_ARRAY),
+                    Property(name="created", data_type=DataType.DATE),
+                    Property(name="status", data_type=DataType.TEXT),
+                ],
+                # Configure for similarity search
+                vector_config=wvc.config.Configure.VectorIndex.none(),
+            )
+
+    def _insert_issues_data_objects_to_db(self, issues_data_objects: List[DataObject]) -> int:
+        total_chunks = 0
+        """Batch insert issues into weaviate DB in WEAVIATE_BATCH_SIZE batches"""
+        for i in range(0, len(issues_data_objects), WEAVIATE_BATCH_SIZE):
+            batch = issues_data_objects[i:i + WEAVIATE_BATCH_SIZE]
+            try:
+                self.jira_collection.data.insert_many(batch)
+                total_chunks += 1
+            except Exception as e:
+                print(f"   ❌ Error inserting issue batch to jira collection. error: {e}")
+
+        return total_chunks
+
+    @staticmethod
+    def _prepare_issues_for_inserting_to_db(issues: List[JiraIssue]) -> List[DataObject]:
+        issues_data_objects = []
+        for jira_issue in issues:
+            try:
+                jira_issue_processor = JiraIssueLLMProcessor(
+                    LLM_MODEL_NAME, VLM_MODEL_NAME, EMBEDDING_MODEL_NAME)
+                issue_summary, _ = jira_issue_processor.process_issue(jira_issue)
+                base_props = {
+                    "issue_key": jira_issue.key,
+                    "summary": issue_summary,
+                    "clean_description": jira_issue.description or "",
+                    "title": jira_issue.summary or "",
+                    # OPTIONAL FILTER FIELDS
+                    "issue_type": jira_issue.issue_type or "",
+                    "priority": jira_issue.priority or "",
+                    "labels": jira_issue.labels or [],
+                    "squad": "",  # TODO: implement squad extraction
+                    "components": [],  # TODO: implement components extraction
+                    "created": jira_issue.created or None,
+                    "status": jira_issue.status or None,
+                }
+
+                issues_data_objects.append(jira_issue_processor.create_data_object(base_props, issue_summary))
+            except Exception as e:
+                print(f"   ❌ Error processing issue {jira_issue.key}, moving to the next issue. error: {e}")
+                continue
+
+        return issues_data_objects
+
+    def index_all(self, page_size: int = 200, jql: str = "order by updated desc"):
+        """Index all Jira issues into Weaviate"""
+        print(f"🚀 Starting Jira indexing...")
+
+        total_chunks = 0
+        total_issues = 0
+
+        jira_client = JiraClient()
+
+        next_page_token = None
+        while True:
+            try:
+                issues, next_page_token = jira_client.fetch_issues(
+                    jql=jql,
+                    max_results=page_size,
+                    next_page_token=next_page_token
+                )
+
+                if not issues:
+                    break
+            except Exception as e:
+                print(f"   ❌ Error fetching jira tickets. error: {e}")
                 break
 
-            print(f"✅ Found {len(issues)} issues")
-            docs = []
-            for issue in issues:
-                issue_docs = cls.issue_to_docs(issue.to_dict())
-                docs.extend(issue_docs)
-                print(f"   📝 {issue.key}: {len(issue_docs)} document chunks")
+            issues_data_objects = self._prepare_issues_for_inserting_to_db(issues)
+            total_issues += len(issues_data_objects)
 
-            print(f"💾 Adding {len(docs)} documents to Chroma...")
-            # add to chroma
-            chroma_collection.add_documents(docs)
-            total_docs_added += len(docs)
+            total_chunks += self._insert_issues_data_objects_to_db(issues_data_objects)
 
-            start_at += len(issues)
-            if len(issues) < page_size:
+            # Check if we've reached the end
+            if not next_page_token:
                 print("🏁 Reached end of issues")
                 break
 
-        print(f"\n🎉 Indexing complete!")
-        print(f"📊 Total documents added: {total_docs_added}")
-        print(f"📊 Final collection count: {chroma_collection._collection.count()}")
+        # TODO: add pydentic
 
-        # persist (Chroma persist happens automatically for local)
-        chroma_collection.persist()
-        print("💾 Database persisted successfully")
+        print(f"\n🎉 Indexing complete!")
+        print(f"📊 Total issues processed: {total_issues}")
+        print(f"📊 Total chunks created: {total_chunks}")
+        print(f"📊 Collection count: {len(self.jira_collection)}")
+
+
+def main():
+    indexer = JiraIndexer()
+    try:
+        jql_query = "created >= -730d order by updated desc"
+        indexer.index_all(page_size=1, jql=jql_query)
+    finally:
+        indexer.db_client.close()
 
 
 if __name__ == "__main__":
-    indexer = JiraIndexer()
-    indexer.index_all()
+    main()
