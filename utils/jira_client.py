@@ -186,6 +186,20 @@ class JiraClient:
         self.auth = HTTPBasicAuth(ATLASSIAN_EMAIL, ATLASSIAN_TOKEN)
         self.headers = {"Accept": "application/json"}
 
+        # Reuse TCP connections; avoids leaving many sockets around
+        self._session = requests.Session()
+        self._session.auth = self.auth
+        self._session.headers.update(self.headers)
+
+    def close(self) -> None:
+        self._session.close()
+
+    def __enter__(self) -> "JiraClient":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
+
     def fetch_issues(
         self, jql="order by updated desc", max_results=50, next_page_token=None
     ) -> Tuple[List[JiraIssue], Optional[str]]:
@@ -198,19 +212,12 @@ class JiraClient:
             "expand": "attachment",
             "project": GUARDICORE_PROJECT_NAME
         }
-        response = requests.get(
-            url, params=params, auth=self.auth, headers=self.headers
-        )
+        response = self._session.get(url, params=params)
         response.raise_for_status()
 
         data = response.json()
-        issues = []
-        for issue_data in data.get("issues", []):
-            issues.append(JiraIssue.from_dict(issue_data))
-
-        next_page_token = data.get("nextPageToken", None)
-
-        return issues, next_page_token
+        issues = [JiraIssue.from_dict(issue_data) for issue_data in data.get("issues", [])]
+        return issues, data.get("nextPageToken", None)
 
     def fetch_issue_by_key(self, issue_key) -> JiraIssue:
         url = f"{self.base_url}/rest/api/3/issue/{issue_key}"
@@ -220,14 +227,14 @@ class JiraClient:
             "expand": "attachment"
         }
 
-        r = requests.get(url, params=params, auth=self.auth, headers=self.headers)
-        r.raise_for_status()
+        response = self._session.get(url, params=params)
+        response.raise_for_status()
 
-        return JiraIssue.from_dict(r.json())
+        return JiraIssue.from_dict(response.json())
 
     def download_attachment(self, attachment_id: str) -> bytes:
         """Download attachment content"""
-        response = requests.get(f'{self.base_url}{self.JIRA_ATTACHMENT_CONTENT_URL}/{attachment_id}', auth=self.auth)
+        response = self._session.get(f"{self.base_url}{self.JIRA_ATTACHMENT_CONTENT_URL}/{attachment_id}")
         response.raise_for_status()
         return response.content
 

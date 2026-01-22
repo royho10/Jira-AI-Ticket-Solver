@@ -1,20 +1,16 @@
 import base64
-import io
-import os
-import rarfile
-import tarfile
-import tempfile
-import zipfile
 
-from concurrent.futures import ThreadPoolExecutor, TimeoutError
-from langchain_community.embeddings import OllamaEmbeddings
+from concurrent.futures import TimeoutError
+from langchain_ollama import OllamaEmbeddings
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_ollama import ChatOllama
 from langsmith import traceable
 from pydantic import BaseModel, Field
+from threading import local
 from typing import List, Tuple, Dict, Any, Optional
 from weaviate.classes.data import DataObject
 
+from utils.file_utils import extract_content_from_zip, extract_content_from_tar, extract_content_from_rar
 from utils.jira_client import JiraIssue, JiraAttachment, JiraClient, JiraRelatedIssue, JiraComment
 
 LOG_FILE_TYPES = ('.log', '.txt', '.out', '.err', '.trace', '.debug', '.zip', '.tar', '.gz', '.tgz', '.tar.gz', '.rar')
@@ -29,8 +25,10 @@ CONTEXT_LINES_AFTER_ERROR = 20  # Number of context lines to keep after errors i
 MAX_WORDS_IN_COMMENTS = 400  # Max words to include from comments
 LLM_CALL_TIMEOUT_SECONDS = 60  # Timeout for LLM calls in seconds
 
+AUTOMATION_FOR_JIRA_COMMENT_AUTHOR = "Automation for Jira"
 
-rarfile.UNRAR_TOOL = "unrar"
+
+_thread_local = local()
 
 
 class ImageAnalysisOutput(BaseModel):
@@ -55,7 +53,7 @@ class ErrorInLog(BaseModel):
 class LogAnalysisOutput(BaseModel):
     """Structured output for log analysis."""
     log_filename: str = Field(description="Name of the log file (.log/.txt suffix)")
-    errors: List[ErrorInLog] = Field(min_items=1,
+    errors: List[ErrorInLog] = Field(min_length=1,
                                      description="List of extracted errors with context. "
                                                  "Must contain at least one error if ERROR "
                                                  "lines exist in the input.")
@@ -90,12 +88,16 @@ class JiraIssueLLMProcessor:
         - first element: summary of the issue after processing attachments, comments, and related issues.
         - second element: list of structured log analysis outputs.
         """
-        image_summaries, log_summaries = self._process_attachments(jira_issue.attachments, status_callback)
+        attachments = jira_issue.attachments or []
+        comments = jira_issue.comments or []
+        related_issues = jira_issue.related_issues or []
+
+        image_summaries, log_summaries = self._process_attachments(attachments, jira_issue.key, status_callback)
         log_summaries_as_text = self._parse_log_analysis_output_to_text(log_summaries)
         image_summaries_as_text = self._parse_image_analysis_output_to_text(image_summaries)
         summarized_attachments = f"{log_summaries_as_text}\n\n{image_summaries_as_text}"
-        comments_text = self._process_comments(jira_issue.comments)
-        related_issues_text = self._process_related_issues(jira_issue.related_issues)
+        comments_text = self._process_comments(comments)
+        related_issues_text = self._process_related_issues(related_issues)
         # TODO: think about github links in the future
 
         if status_callback:
@@ -109,7 +111,27 @@ class JiraIssueLLMProcessor:
 
         return issue_summary_as_text, log_summaries
 
-    def _process_attachments(self, attachments: List[JiraAttachment], status_callback: Any = None) -> (
+    def _get_llm(self) -> ChatOllama:
+        # Reuse one LLM client per thread to reduce socket churn
+        if not hasattr(_thread_local, "llm") or _thread_local.llm is None:
+            _thread_local.llm = ChatOllama(
+                model=self.llm_model_name,
+                base_url="http://localhost:11434",
+                temperature=0.1,
+            )
+        return _thread_local.llm
+
+    def _get_vlm(self) -> ChatOllama:
+        # Reuse one VLM client per thread to reduce socket churn
+        if not hasattr(_thread_local, "vlm") or _thread_local.vlm is None:
+            _thread_local.vlm = ChatOllama(
+                model=self.vlm_model_name,
+                base_url="http://localhost:11434",
+                temperature=0.1,
+            )
+        return _thread_local.vlm
+
+    def _process_attachments(self, attachments: List[JiraAttachment], issue_key: str, status_callback: Any = None) -> (
             Tuple)[List[str], List[LogAnalysisOutput]]:
         """
         Process attachments (images and logs) and return their summaries.
@@ -130,7 +152,7 @@ class JiraIssueLLMProcessor:
             if status_callback:
                 # update status for UI
                 status_callback.markdown(f"📋 **Analyzing log files... can take some time... ({idx + 1}/{len(log_attachments)})**")
-            log_summaries += self._process_log_attachment(attachment)
+            log_summaries += self._process_log_attachment(attachment, issue_key)
 
         return image_summaries, log_summaries
 
@@ -152,7 +174,7 @@ class JiraIssueLLMProcessor:
                 "image_url": f"data:image/jpeg;base64,{image_b64}",
             }
             content_parts.append(image_part)
-            vlm = ChatOllama(model=self.vlm_model_name, base_url="http://localhost:11434", temperature=0.1)
+            vlm = self._get_vlm()
             structured_vlm = vlm.with_structured_output(ImageAnalysisOutput)
             messages = [
                 SystemMessage(content=image_system_prompt),
@@ -198,16 +220,16 @@ class JiraIssueLLMProcessor:
             """
         return image_user_prompt
 
-    def _process_log_attachment(self, attachment: JiraAttachment) -> (
+    def _process_log_attachment(self, attachment: JiraAttachment, issue_key: str) -> (
             Optional)[List[LogAnalysisOutput]]:
         """Process log attachment to extract meaningful text"""
-        logs = self._extract_logs_from_file(attachment)
+        logs = self._extract_logs_from_file(attachment, issue_key)
         filtered_logs = self._filter_noise_from_logs(logs)
         summarized_logs = self._summarize_filtered_logs(filtered_logs)
         return summarized_logs
 
     @staticmethod
-    def _extract_logs_from_file(attachment: JiraAttachment) -> List[Tuple[str, str]]:
+    def _extract_logs_from_file(attachment: JiraAttachment, issue_key: str) -> List[Tuple[str, str]]:
         """
         Extract log contents from attachment file based on its type.
         returns a list of tuples (log_text, filename)
@@ -218,88 +240,27 @@ class JiraIssueLLMProcessor:
         try:
             file = JiraClient().download_attachment(attachment.id)
         except Exception as e:
-            print(f"   ❌ Error downloading log attachment {attachment.filename}: {e}")
+            print(f"   ❌ Error downloading log attachment {attachment.filename} for {issue_key}: {e}")
             return []
 
         if suffix == 'zip':
-            with zipfile.ZipFile(io.BytesIO(file), "r") as z:
-                files = [f for f in z.namelist() if not f.endswith("/")]
-
-                for f in files[:MAX_LOG_FILES_TO_PROCESS]:
-                    if not (f.endswith(".log") or f.endswith(".txt")):
-                        continue
-
-                    try:
-                        with z.open(f) as file:
-                            text = file.read().decode("utf-8", errors="ignore")
-                            log_contents.append((text, f))
-
-                    except Exception as e:
-                        print(f"   ❌ Error processing log attachment {f}: {e}")
-                        return []
-
-        if suffix in ('tar', 'gz', 'tgz') or attachment.filename.lower().endswith(('.tar.gz', '.tar')):
             try:
-                mode = 'r:gz' if suffix in ('gz', 'tgz') or attachment.filename.lower().endswith('.tar.gz') else 'r'
-                with tarfile.open(fileobj=io.BytesIO(file), mode=mode) as tar:
-                    members = [m for m in tar.getmembers() if m.isfile()]
-
-                    for member in members[:MAX_LOG_FILES_TO_PROCESS]:
-                        if not (member.name.endswith(".log") or member.name.endswith(".txt")):
-                            continue
-
-                        try:
-                            extracted_file = tar.extractfile(member)
-                            if extracted_file:
-                                text = extracted_file.read().decode("utf-8", errors="ignore")
-                                log_contents.append((text, member.name))
-                        except Exception as e:
-                            print(f"   ❌ Error processing tar member {member.name}: {e}")
-
+                log_contents = extract_content_from_zip(file, MAX_LOG_FILES_TO_PROCESS)
             except Exception as e:
-                print(f"   ❌ Error processing tar attachment {attachment.filename}: {e}")
+                print(f"   ❌ Error processing log attachment {attachment.filename} for {issue_key}: {e}")
+                return []
+
+        if suffix in ('tar', 'gz', 'tgz'):
+            try:
+                log_contents = extract_content_from_tar(file, suffix, MAX_LOG_FILES_TO_PROCESS)
+            except Exception as e:
+                print(f"   ❌ Error processing tar attachment {attachment.filename} for {issue_key}: {e}")
 
         if suffix == 'rar':
-            tmp_path = None
-            extract_dir = None
             try:
-                import shutil
-
-                with tempfile.NamedTemporaryFile(delete=False, suffix='.rar') as tmp:
-                    tmp.write(file)
-                    tmp_path = tmp.name
-
-                extract_dir = tempfile.mkdtemp()
-
-                with rarfile.RarFile(tmp_path) as rf:
-                    # Extract ALL files at once (required for solid archives)
-                    rf.extractall(extract_dir)
-
-                # Now read from extracted files on disk
-                count = 0
-                for root, dirs, filenames in os.walk(extract_dir):
-                    for fname in filenames:
-                        if count >= MAX_LOG_FILES_TO_PROCESS:
-                            break
-                        if not (fname.endswith(".log") or fname.endswith(".txt")):
-                            continue
-
-                        fpath = os.path.join(root, fname)
-                        try:
-                            with open(fpath, 'r', encoding='utf-8', errors='ignore') as f:
-                                text = f.read()
-                                log_contents.append((text, fname))
-                                count += 1
-                        except Exception as e:
-                            print(f"   ❌ Error reading {fname}: {e}")
-
+                log_contents = extract_content_from_rar(file, MAX_LOG_FILES_TO_PROCESS)
             except Exception as e:
-                print(f"   ❌ Error processing rar attachment {attachment.filename}: {e}")
-            finally:
-                if tmp_path and os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
-                if extract_dir and os.path.exists(extract_dir):
-                    shutil.rmtree(extract_dir, ignore_errors=True)
+                print(f"   ❌ Error processing rar attachment {attachment.filename} for {issue_key}: {e}")
 
         if suffix == 'log' or suffix == 'txt':
             try:
@@ -374,7 +335,7 @@ class JiraIssueLLMProcessor:
             Optional[List[LogAnalysisOutput]]):
         """Summarize filtered logs using LLM,"""
         if not filtered_logs:
-            return None
+            return []
 
         all_summaries = []
         for log in filtered_logs:
@@ -388,29 +349,26 @@ class JiraIssueLLMProcessor:
 
     @traceable
     def _summarize_log(self, log: Tuple[str, str]) -> Optional[LogAnalysisOutput]:
-        """Summarize a single batch of logs"""
+        """Summarize a log file"""
         system_prompt = self._create_log_summery_system_prompt()
         log_summery_prompt = self._create_log_summery_prompt(log)
-        llm = ChatOllama(model=self.llm_model_name, base_url="http://localhost:11434", temperature=0.1)
+
+        llm = self._get_llm()
         structured_llm = llm.with_structured_output(LogAnalysisOutput)
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=log_summery_prompt)
         ]
         try:
-            with ThreadPoolExecutor(max_workers=1) as executor:
-                future = executor.submit(structured_llm.invoke, messages, config=None)
-                response = future.result(timeout=LLM_CALL_TIMEOUT_SECONDS)
+            response = structured_llm.invoke(messages)
         except TimeoutError:
             print(f"   ❌ LLM call timed out after {LLM_CALL_TIMEOUT_SECONDS} seconds for log {log[1]}")
             return None
 
-        response.log_filename = log[1]
-
-        # Handle both dict and BaseModel return types
         if isinstance(response, dict):
             response = LogAnalysisOutput(**response)
 
+        response.log_filename = log[1]
         return response
 
     @staticmethod
@@ -473,7 +431,7 @@ class JiraIssueLLMProcessor:
     {chr(10).join(summaries)}
     """
 
-        llm = ChatOllama(model=self.llm_model_name, base_url="http://localhost:11434", temperature=0.1)
+        llm = self._get_llm()
         messages = [
             SystemMessage(content=system_prompt),
             HumanMessage(content=user_prompt)
@@ -491,15 +449,21 @@ class JiraIssueLLMProcessor:
         2. For error_lines: Copy the ENTIRE log line verbatim, exactly as written
         3. For context: Write 1-2 sentences explaining what the error means
         4. For source_code_filename: Only include .py files mentioned in the error
+        5. Deduplicate errors with minor differences (e.g., timestamps, thread IDs) if they are otherwise identical.
+           - Merge such errors into one entry, and include the most recent timestamp.
+           - Ensure the context remains accurate and relevant.
+
         
         EXAMPLE INPUT:
         2024-01-15 10:23:45 ERROR controller.py:142 - Failed to connect to database: timeout
+        2024-01-15 10:24:00 ERROR controller.py:142 - Failed to connect to database: timeout
         
         EXAMPLE OUTPUT:
-        - error_lines: "2024-01-15 10:23:45 ERROR controller.py:142 - Failed to connect to database: timeout"
+        - error_lines: "2024-01-15 10:24:00 ERROR controller.py:142 - Failed to connect to database: timeout"
         - source_code_filename: "controller.py"
         - context: "Database connection failed due to a timeout error."
         
+        remove any duplicate errors found in the same log file.
         DO NOT summarize or shorten error_lines. Copy exactly."""
 
         return log_summery_system_prompt
@@ -538,7 +502,7 @@ class JiraIssueLLMProcessor:
         """Aggregate multiple attachment summaries into one final summary"""
         aggregate_attachments_system_prompt = self._create_aggregate_attachments_system_propmt()
         aggregate_attachments_prompt = self._create_aggregate_attachments_propmt(image_summaries, log_summaries)
-        llm = ChatOllama(model=self.llm_model_name, base_url="http://localhost:11434", temperature=0.1)
+        llm = self._get_llm()
         messages = [
             SystemMessage(content=aggregate_attachments_system_prompt),
             HumanMessage(content=aggregate_attachments_prompt)
@@ -618,6 +582,8 @@ class JiraIssueLLMProcessor:
         result = []
         word_count = 0
         for comment in sorted_comments:
+            if comment.author_display_name == AUTOMATION_FOR_JIRA_COMMENT_AUTHOR:
+                continue  # skip comments from Automation for Jira
             text = f"{comment.author_display_name}: {comment.body}"
             words = text.split()
             if word_count + len(words) > MAX_WORDS_IN_COMMENTS:
@@ -666,7 +632,7 @@ class JiraIssueLLMProcessor:
         final_issue_summery_prompt = self._create_final_issue_summery_prompt(
             jira_issue, comments_text, summarized_attachments, related_issues_text
         )
-        llm = ChatOllama(model=self.llm_model_name, base_url="http://localhost:11434", temperature=0.1)
+        llm = self._get_llm()
         structured_llm = llm.with_structured_output(FinalIssueSummeryOutput)
         messages = [
             SystemMessage(content=final_issue_summery_system_prompt),

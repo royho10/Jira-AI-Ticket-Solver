@@ -17,7 +17,7 @@ import weaviate
 import weaviate.classes as wvc
 
 from dotenv import load_dotenv
-from langchain_community.embeddings import OllamaEmbeddings
+from langchain_ollama import OllamaEmbeddings
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_ollama import ChatOllama
 from langsmith import Client, traceable
@@ -25,6 +25,8 @@ from pydantic import BaseModel, Field
 
 from utils.jira_client import JiraIssue, JiraClient, extract_jira_keys_from_text, ATLASSIAN_INSTANCE_URL
 from utils.jira_ticket_processing import JiraIssueLLMProcessor, LogAnalysisOutput
+from utils.weaviate_utils import JIRA_COLLECTION_NAME
+
 
 # Configure logging
 logging.basicConfig(
@@ -38,14 +40,18 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 load_dotenv()
-EMBEDDING_MODEL_NAME = "nomic-embed-text"
+EMBEDDING_MODEL_NAME = "nomic-embed-text-v2-moe"  # nomic-embed-text?
 VLM_MODEL_NAME = "qwen2.5vl:7b"
 LLM_MODEL_NAME = "llama3"
 JIRA_BASE_URL = os.environ.get("ATLASSIAN_INSTANCE_URL", "").replace("/rest/api/3", "").rstrip("/")
 MAX_NUM_SIMILAR_TICKETS_FROM_RAG = 5
 NUM_MOST_RELEVANT_TICKETS_TO_RETURN = 5
 MAX_MSG_HISTORY = 10
-JIRA_COLLECTION_NAME = "JiraCollection"
+NUM_EMBEDDING_RETRIES = 2
+MAX_EMBEDDINGS_INPUT_CHARS = 4000
+
+
+EMBEDDER = OllamaEmbeddings(model=EMBEDDING_MODEL_NAME, base_url="http://localhost:11434")
 
 
 class IntentClassification(Enum):
@@ -94,7 +100,7 @@ class JiraChatBot:
         Do not hallucinate. If something is unknown, say "unknown".
         """
         self.history = [SystemMessage(content=self.system_prompt)]
-        self.embedder = OllamaEmbeddings(model=EMBEDDING_MODEL_NAME, base_url="http://localhost:11434")
+        self.embedder = EMBEDDER
 
         # ---- Connect to Weaviate ----
         self.db_client = weaviate.connect_to_local()
@@ -179,6 +185,8 @@ class JiraChatBot:
             # Add response to chat history
             self._add_assistant(response)
 
+            st.rerun()
+
         # Display current ticket info in sidebar
         if st.session_state.current_ticket:
             st.sidebar.markdown("---")
@@ -244,11 +252,10 @@ class JiraChatBot:
         if status_placeholder:
             status_placeholder.markdown("🔍 **Finding similar tickets...**")
 
-        query_text = issue_summary + "\n\n" + jira_issue.description
+        query_text = (issue_summary + "\n\n" + jira_issue.description)[:MAX_EMBEDDINGS_INPUT_CHARS]
 
         # Generate embedding using Ollama
-        embedder = OllamaEmbeddings(model=EMBEDDING_MODEL_NAME, base_url="http://localhost:11434")
-        query_embedding = embedder.embed_query(query_text)
+        query_embedding = self.embedder.embed_documents([query_text])[0]
 
         # Query RAG for similar tickets
         jira_collection = self.db_client.collections.get(JIRA_COLLECTION_NAME)
@@ -370,7 +377,6 @@ class JiraChatBot:
             final_analysis = FinalAnalysisOutput(**final_analysis)
 
         final_analysis_text = self._parse_final_analysis_output(final_analysis, logs_analysis)
-        print("Final Analysis Output:", final_analysis_text)
 
         return final_analysis_text
 
@@ -411,8 +417,9 @@ class JiraChatBot:
         - Labels: {ticket.get('labels', [])}
         - Issue Type: {ticket.get('issue_type', 'Unknown')}
         """)
-        similar_tickets_formatted = "\n".join(similar_tickets_details)
+        similar_tickets_formatted = "\n".join(similar_tickets_details).strip() or "NONE"
         current_ticket = st.session_state.current_ticket
+        similat_tickets_num = 0 if similar_tickets_formatted == "NONE" else len(st.session_state.similar_tickets)
 
         final_analysis_input_prompt = f"""
         Current Jira ticket information:
@@ -425,6 +432,15 @@ class JiraChatBot:
         
         Top 5 most similar Jira tickets (already reranked by relevance):
         {similar_tickets_formatted}
+        
+        HARD RULES (must follow):
+        - You MUST return `similar_tickets` with EXACTLY {similat_tickets_num} items.
+        - You MUST include EVERY provided similar ticket key exactly once.
+        - Do NOT drop items. Do NOT merge items. Do NOT invent additional items.
+        - If the "Top similar Jira tickets" section is "NONE":
+          - Return an empty list for similar_tickets: []
+          - Do NOT mention any other Jira ticket keys in any section
+          - Any similarity_reason/solutions based on similar tickets must be "unknown"
         
         IMPORTANT: For each similar ticket, provide a SPECIFIC similarity_reason explaining 
         what EXACTLY makes it similar (e.g., "Same API endpoint failure", "Identical NPE in UserService.java", 
@@ -492,7 +508,7 @@ class JiraChatBot:
             f"{root_causes_formatted}\n"
             f"* Errors found in logs:\n"
             f"{errors_in_logs_formatted}\n\n"
-            f"## 🎯 Top 5 Similar Tickets\n"
+            f"## 🎯 Top Similar Tickets\n"
             f"{similar_tickets_formatted}\n\n"
             f"## 💡 Suggested Solutions\n"
             f"{suggested_solutions_formatted}\n\n"
