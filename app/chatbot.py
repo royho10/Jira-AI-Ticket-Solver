@@ -23,9 +23,16 @@ from langchain_ollama import ChatOllama
 from langsmith import Client, traceable
 from pydantic import BaseModel, Field
 
+from config.settings import (
+    EMBEDDING_MODEL_NAME,
+    VLM_MODEL_NAME,
+    LLM_MODEL_NAME,
+    OLLAMA_BASE_URL,
+    JIRA_COLLECTION_NAME,
+    MAX_EMBEDDINGS_INPUT_CHARS,
+)
 from utils.jira_client import JiraIssue, JiraClient, extract_jira_keys_from_text, ATLASSIAN_INSTANCE_URL
 from utils.jira_ticket_processing import JiraIssueLLMProcessor, LogAnalysisOutput
-from utils.weaviate_utils import JIRA_COLLECTION_NAME
 
 
 # Configure logging
@@ -40,18 +47,16 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 load_dotenv()
-EMBEDDING_MODEL_NAME = "nomic-embed-text-v2-moe"  # nomic-embed-text?
-VLM_MODEL_NAME = "qwen2.5vl:7b"
-LLM_MODEL_NAME = "llama3"
 JIRA_BASE_URL = os.environ.get("ATLASSIAN_INSTANCE_URL", "").replace("/rest/api/3", "").rstrip("/")
+
+# Chatbot-specific constants
 MAX_NUM_SIMILAR_TICKETS_FROM_RAG = 5
 NUM_MOST_RELEVANT_TICKETS_TO_RETURN = 5
 MAX_MSG_HISTORY = 10
 NUM_EMBEDDING_RETRIES = 2
-MAX_EMBEDDINGS_INPUT_CHARS = 4000
 
 
-EMBEDDER = OllamaEmbeddings(model=EMBEDDING_MODEL_NAME, base_url="http://localhost:11434")
+EMBEDDER = OllamaEmbeddings(model=EMBEDDING_MODEL_NAME, base_url=OLLAMA_BASE_URL)
 
 
 class IntentClassification(Enum):
@@ -93,7 +98,7 @@ class JiraChatBot:
             model: str = LLM_MODEL_NAME,
             max_history: int = MAX_MSG_HISTORY,
     ):
-        self.chat = ChatOllama(model=model, base_url="http://localhost:11434", verbose=True, temperature=0.1)
+        self.chat = ChatOllama(model=model, base_url=OLLAMA_BASE_URL, verbose=True, temperature=0.1)
         self.max_history = max_history
         self.system_prompt = """You are a helpful Jira ticket solver assistant.
         Be concise and factual.
@@ -252,7 +257,7 @@ class JiraChatBot:
         if status_placeholder:
             status_placeholder.markdown("🔍 **Finding similar tickets...**")
 
-        query_text = (issue_summary + "\n\n" + jira_issue.description)[:MAX_EMBEDDINGS_INPUT_CHARS]
+        query_text = (issue_summary + "\n\n" + (jira_issue.description or ""))[:MAX_EMBEDDINGS_INPUT_CHARS]
 
         # Generate embedding using Ollama
         query_embedding = self.embedder.embed_documents([query_text])[0]
@@ -366,7 +371,7 @@ class JiraChatBot:
         """Generate final ticket analysis with LLM using similar tickets."""
         final_analysis_system_prompt = self._create_final_analysis_system_prompt()
         final_analysis_input_prompt = self._create_final_analysis_input_prompt()
-        llm = ChatOllama(model=LLM_MODEL_NAME, base_url="http://localhost:11434", temperature=0.1)
+        llm = ChatOllama(model=LLM_MODEL_NAME, base_url=OLLAMA_BASE_URL, temperature=0.1)
         structured_llm = llm.with_structured_output(FinalAnalysisOutput)
         messages = [
             SystemMessage(content=final_analysis_system_prompt),

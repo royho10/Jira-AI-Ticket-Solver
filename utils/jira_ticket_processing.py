@@ -10,20 +10,23 @@ from threading import local
 from typing import List, Tuple, Dict, Any, Optional
 from weaviate.classes.data import DataObject
 
+from config.settings import (
+    OLLAMA_BASE_URL,
+    LLM_CALL_TIMEOUT_SECONDS,
+)
 from utils.file_utils import extract_content_from_zip, extract_content_from_tar, extract_content_from_rar
 from utils.jira_client import JiraIssue, JiraAttachment, JiraClient, JiraRelatedIssue, JiraComment
 
 LOG_FILE_TYPES = ('.log', '.txt', '.out', '.err', '.trace', '.debug', '.zip', '.tar', '.gz', '.tgz', '.tar.gz', '.rar')
 IMAGE_FILE_TYPES = ('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tiff')
 
-
-MAX_LOG_FILES_TO_PROCESS = 20  # Max number of log files to process within a zip
-MAX_LINES_PER_LOG = 50  # hard cap on lines per log file to process
-MAX_LOGS_PER_LLM_CALL = 3  # Number of log files per LLM call
-CONTEXT_LINES_BEFORE_ERROR = 10  # Number of context lines to keep before errors in logs
-CONTEXT_LINES_AFTER_ERROR = 20  # Number of context lines to keep after errors in logs
-MAX_WORDS_IN_COMMENTS = 400  # Max words to include from comments
-LLM_CALL_TIMEOUT_SECONDS = 60  # Timeout for LLM calls in seconds
+# Ticket processing-specific constants
+MAX_LOG_FILES_TO_PROCESS = 20
+MAX_LINES_PER_LOG = 50
+MAX_LOGS_PER_LLM_CALL = 3
+CONTEXT_LINES_BEFORE_ERROR = 10
+CONTEXT_LINES_AFTER_ERROR = 20
+MAX_WORDS_IN_COMMENTS = 400
 
 AUTOMATION_FOR_JIRA_COMMENT_AUTHOR = "Automation for Jira"
 
@@ -78,7 +81,7 @@ class JiraIssueLLMProcessor:
         if embedding_model_name:
             self.embedding_model = OllamaEmbeddings(
                 model=embedding_model_name,
-                base_url="http://localhost:11434"  # Explicitly set Ollama URL
+                base_url=OLLAMA_BASE_URL
             )
 
     def process_issue(self, jira_issue: JiraIssue, status_callback: Any = None) -> Tuple[str, List[LogAnalysisOutput]]:
@@ -116,7 +119,7 @@ class JiraIssueLLMProcessor:
         if not hasattr(_thread_local, "llm") or _thread_local.llm is None:
             _thread_local.llm = ChatOllama(
                 model=self.llm_model_name,
-                base_url="http://localhost:11434",
+                base_url=OLLAMA_BASE_URL,
                 temperature=0.1,
             )
         return _thread_local.llm
@@ -126,7 +129,7 @@ class JiraIssueLLMProcessor:
         if not hasattr(_thread_local, "vlm") or _thread_local.vlm is None:
             _thread_local.vlm = ChatOllama(
                 model=self.vlm_model_name,
-                base_url="http://localhost:11434",
+                base_url=OLLAMA_BASE_URL,
                 temperature=0.1,
             )
         return _thread_local.vlm

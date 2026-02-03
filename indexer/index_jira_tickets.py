@@ -7,10 +7,9 @@ import weaviate.classes as wvc
 import sys
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from enum import Enum
 from langchain_ollama import OllamaEmbeddings
 from pathlib import Path
-from typing import List
+from typing import List, Set
 from weaviate.classes.config import Property, DataType
 from weaviate.classes.data import DataObject
 
@@ -18,42 +17,20 @@ from weaviate.classes.data import DataObject
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-from utils.weaviate_utils import JIRA_COLLECTION_NAME
-
-# Add project root to path
-project_root = Path(__file__).parent.parent
-sys.path.insert(0, str(project_root))
-
+from config.settings import (
+    EMBEDDING_MODEL_NAME,
+    VLM_MODEL_NAME,
+    LLM_MODEL_NAME,
+    OLLAMA_BASE_URL,
+    JIRA_COLLECTION_NAME,
+    MAX_EMBEDDINGS_INPUT_CHARS,
+)
 from utils.jira_client import JiraClient, JiraIssue
 from utils.jira_ticket_processing import JiraIssueLLMProcessor
 
-# -------------------------------
-# CONFIG
-# -------------------------------
-EMBEDDING_MODEL_NAME = "nomic-embed-text-v2-moe"
-VLM_MODEL_NAME = "qwen2.5vl:7b"
-LLM_MODEL_NAME = "llama3"
-MAX_LOG_FILES_TO_PROCESS = 20  # Max number of log files to process within a zip
-MAX_LINES_PER_LOG = 500  # hard cap on lines per log file to process
-CONTEXT_LINES_BEFORE_ERROR = 10  # Number of context lines to keep before errors in logs
-CONTEXT_LINES_AFTER_ERROR = 20  # Number of context lines to keep after errors in logs
-WEAVIATE_BATCH_SIZE = 100  # Number of objects to batch insert into Weaviate at once
-MAX_PROCESS_TICKET_WORKERS = 5  # Number of threads to use for processing tickets
-
-
-class ContentType(Enum):
-    SUMMARY = "summary"
-    DESCRIPTION = "description"
-    COMMENT = "comment"
-    ATTACHMENT_TEXT = "attachment_text"
-    ATTACHMENT_LOG = "attachment_log"
-    ATTACHMENT_IMAGE_TEXT = "attachment_image_text"
-
-
-class Componenets(Enum):
-    MANAGEMENT = "management"
-    AGGREGATOR = "aggregator"
-    AGENT = "agent"
+# Indexer-specific constants
+WEAVIATE_BATCH_SIZE = 100
+MAX_PROCESS_TICKET_WORKERS = 5
 
 
 class JiraIndexer:
@@ -62,7 +39,7 @@ class JiraIndexer:
         self.jira_client = JiraClient()
         self.embedding_model = OllamaEmbeddings(
             model=EMBEDDING_MODEL_NAME,
-            base_url="http://localhost:11434"  # Explicitly set Ollama URL
+            base_url=OLLAMA_BASE_URL
         )
 
         # Setup collection
@@ -101,6 +78,19 @@ class JiraIndexer:
                     Property(name="status", data_type=DataType.TEXT),
                 ]
             )
+
+    def _get_existing_issue_keys(self) -> Set[str]:
+        """Fetch all existing issue keys from the collection to avoid duplicates."""
+        existing_keys = set()
+        try:
+            for item in self.jira_collection.iterator():
+                issue_key = item.properties.get("issue_key")
+                if issue_key:
+                    existing_keys.add(issue_key)
+            print(f"📋 Found {len(existing_keys)} existing tickets in database")
+        except Exception as e:
+            print(f"   ⚠️ Could not fetch existing keys: {e}")
+        return existing_keys
 
     def _insert_issues_data_objects_to_db(self, issues_data_objects: List[DataObject]) -> int:
         total_chunks = 0
@@ -157,7 +147,9 @@ class JiraIndexer:
 
                 print(f"[{ticket_no}/{total}] Done {jira_issue.key}")
 
-                return jira_issue_processor.create_data_object(base_props, issue_summary)
+                # Embed both summary and description for better similarity matching
+                content_to_embed = (issue_summary + "\n\n" + (jira_issue.description or ""))[:MAX_EMBEDDINGS_INPUT_CHARS]
+                return jira_issue_processor.create_data_object(base_props, content_to_embed)
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
                 print(f"Ollama crashed or is unavailable, moving to the next issue. error: {e}")
             except Exception as e:
@@ -177,8 +169,12 @@ class JiraIndexer:
         """Index all Jira issues into Weaviate"""
         print(f"🚀 Starting Jira indexing...")
 
+        # Fetch existing keys to avoid duplicates
+        existing_keys = self._get_existing_issue_keys()
+
         total_chunks = 0
         total_issues = 0
+        skipped_issues = 0
 
         jira_client = JiraClient()
 
@@ -197,20 +193,37 @@ class JiraIndexer:
                 print(f"   ❌ Error fetching jira tickets. error: {e}")
                 break
 
-            issues_data_objects = self._prepare_issues_for_inserting_to_db(issues)
+            # Filter out already indexed issues
+            new_issues = [issue for issue in issues if issue.key not in existing_keys]
+            skipped_in_batch = len(issues) - len(new_issues)
+            skipped_issues += skipped_in_batch
+
+            if skipped_in_batch > 0:
+                print(f"   ⏭️ Skipping {skipped_in_batch} already indexed tickets")
+
+            if not new_issues:
+                if not next_page_token:
+                    print("🏁 Reached end of issues")
+                    break
+                continue
+
+            issues_data_objects = self._prepare_issues_for_inserting_to_db(new_issues)
             total_issues += len(issues_data_objects)
 
             total_chunks += self._insert_issues_data_objects_to_db(issues_data_objects)
+
+            # Add newly indexed keys to existing_keys set to handle duplicates within the same run
+            for issue in new_issues:
+                existing_keys.add(issue.key)
 
             # Check if we've reached the end
             if not next_page_token:
                 print("🏁 Reached end of issues")
                 break
 
-        # TODO: add pydentic
-
         print(f"\n🎉 Indexing complete!")
         print(f"📊 Total issues processed: {total_issues}")
+        print(f"📊 Total issues skipped (already indexed): {skipped_issues}")
         print(f"📊 Total chunks created: {total_chunks}")
         print(f"📊 Collection count: {len(self.jira_collection)}")
 
