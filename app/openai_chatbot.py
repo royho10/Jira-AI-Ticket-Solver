@@ -1,4 +1,4 @@
-# app/streamlit_app.py
+# app/openai_chatbot.py
 import json
 import logging
 import os
@@ -17,22 +17,24 @@ import weaviate
 import weaviate.classes as wvc
 
 from dotenv import load_dotenv
-from langchain_ollama import OllamaEmbeddings
+from langchain_openai import AzureOpenAIEmbeddings, AzureChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
-from langchain_ollama import ChatOllama
 from langsmith import Client, traceable
 from pydantic import BaseModel, Field
 
 from config.settings import (
-    EMBEDDING_MODEL_NAME,
-    VLM_MODEL_NAME,
-    LLM_MODEL_NAME,
-    OLLAMA_BASE_URL,
-    JIRA_COLLECTION_NAME,
+    AZURE_OPENAI_ENDPOINT,
+    AZURE_OPENAI_API_KEY,
+    AZURE_OPENAI_API_VERSION,
+    AZURE_OPENAI_LLM_DEPLOYMENT,
+    AZURE_OPENAI_EMBEDDING_DEPLOYMENT,
+    AZURE_OPENAI_TEMPERATURE,
+    OPENAI_JIRA_COLLECTION_NAME,
     MAX_EMBEDDINGS_INPUT_CHARS,
 )
 from utils.jira_client import JiraIssue, JiraClient, extract_jira_keys_from_text, ATLASSIAN_INSTANCE_URL
-from utils.jira_ticket_processing import JiraIssueLLMProcessor, LogAnalysisOutput
+from utils.openai_jira_ticket_processing import OpenAIJiraIssueLLMProcessor
+from utils.jira_ticket_processing import LogAnalysisOutput
 
 
 # Configure logging
@@ -41,7 +43,7 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler('chatbot_debug.log')
+        logging.FileHandler('openai_chatbot_debug.log')
     ]
 )
 logger = logging.getLogger(__name__)
@@ -56,7 +58,12 @@ MAX_MSG_HISTORY = 10
 NUM_EMBEDDING_RETRIES = 2
 
 
-EMBEDDER = OllamaEmbeddings(model=EMBEDDING_MODEL_NAME, base_url=OLLAMA_BASE_URL)
+EMBEDDER = AzureOpenAIEmbeddings(
+    azure_deployment=AZURE_OPENAI_EMBEDDING_DEPLOYMENT,
+    azure_endpoint=AZURE_OPENAI_ENDPOINT,
+    api_key=AZURE_OPENAI_API_KEY,
+    openai_api_version=AZURE_OPENAI_API_VERSION,
+)
 
 
 class IntentClassification(Enum):
@@ -92,18 +99,46 @@ class FinalAnalysisOutput(BaseModel):
     important_notes: List[str] = Field(description="List of important notes, warnings, or risks")
 
 
-class JiraChatBot:
+class OpenAIJiraChatBot:
+    """
+    Streamlit chatbot using Azure OpenAI for LLM and embeddings.
+    Uses JiraCollectionOpenAI Weaviate collection for vector similarity search.
+    """
+
     def __init__(
             self,
-            model: str = LLM_MODEL_NAME,
+            deployment: str = AZURE_OPENAI_LLM_DEPLOYMENT,
             max_history: int = MAX_MSG_HISTORY,
     ):
-        self.chat = ChatOllama(model=model, base_url=OLLAMA_BASE_URL, verbose=True, temperature=0.1)
+        self.chat = AzureChatOpenAI(
+            azure_deployment=deployment,
+            azure_endpoint=AZURE_OPENAI_ENDPOINT,
+            openai_api_version=AZURE_OPENAI_API_VERSION,
+            openai_api_key=AZURE_OPENAI_API_KEY,
+            temperature=AZURE_OPENAI_TEMPERATURE,
+        )
         self.max_history = max_history
-        self.system_prompt = """You are a helpful Jira ticket solver assistant.
-        Be concise and factual.
-        Do not hallucinate. If something is unknown, say "unknown".
-        """
+        self.system_prompt = """You are a Jira ticket analysis assistant that helps engineers understand and troubleshoot issues.
+
+Your ONLY capabilities:
+1. Analyze Jira tickets when users provide a ticket key (e.g., GC-123)
+2. Find similar past tickets using RAG-based vector search
+3. Identify patterns, errors, and potential solutions based on similar tickets
+4. Answer follow-up questions about analyzed tickets
+
+What you CANNOT do:
+- Create new Jira tickets
+- Update ticket status, priority, assignee, or any fields
+- Add comments, labels, or modify tickets in any way
+- Access Jira APIs for write operations
+
+When greeting users or responding to unrelated chat:
+- Briefly introduce yourself
+- Ask them to provide a Jira ticket key to analyze
+- Do NOT list capabilities you don't have
+
+Be concise, factual, and technical. If something is unknown, say "unknown".
+"""
         self.history = [SystemMessage(content=self.system_prompt)]
         self.embedder = EMBEDDER
 
@@ -134,8 +169,8 @@ class JiraChatBot:
     # ------------------------
     def run(self) -> None:
         # ---- Streamlit UI ----
-        st.set_page_config(page_title="Jira Ticket Assistant", layout="wide")
-        st.title("🎫 Jira Ticket Assistant")
+        st.set_page_config(page_title="Jira Ticket Assistant (OpenAI)", layout="wide")
+        st.title("🎫 Jira Ticket Assistant (OpenAI)")
         st.sidebar.markdown("### 📖 How to Use")
         st.sidebar.markdown("""
         1. Enter a Jira ticket key (e.g., `GC-123`) or paste a URL
@@ -240,8 +275,10 @@ class JiraChatBot:
         except Exception as e:
             return f"❌ Failed to fetch Jira issue: {e}"
 
-        issue_summary, logs_analysis = JiraIssueLLMProcessor(LLM_MODEL_NAME, VLM_MODEL_NAME).process_issue(
-            jira_issue, status_placeholder)
+        issue_summary, logs_analysis = OpenAIJiraIssueLLMProcessor(
+            AZURE_OPENAI_LLM_DEPLOYMENT, AZURE_OPENAI_LLM_DEPLOYMENT
+        ).process_issue(jira_issue, status_placeholder)
+
         # Store current ticket
         st.session_state.current_ticket = {
             "key": jira_issue.key,
@@ -259,11 +296,11 @@ class JiraChatBot:
 
         query_text = (issue_summary + "\n\n" + (jira_issue.description or ""))[:MAX_EMBEDDINGS_INPUT_CHARS]
 
-        # Generate embedding using Ollama
+        # Generate embedding using OpenAI
         query_embedding = self.embedder.embed_documents([query_text])[0]
 
-        # Query RAG for similar tickets
-        jira_collection = self.db_client.collections.get(JIRA_COLLECTION_NAME)
+        # Query RAG for similar tickets from OpenAI collection
+        jira_collection = self.db_client.collections.get(OPENAI_JIRA_COLLECTION_NAME)
         similar_tickets_from_rag = jira_collection.query.near_vector(
             near_vector=query_embedding,
             limit=MAX_NUM_SIMILAR_TICKETS_FROM_RAG,
@@ -309,67 +346,19 @@ class JiraChatBot:
     def _rerank_similar_tickets(self) -> str:
         """Rerank similar tickets using LLM for better relevance."""
         # TODO: Add reranking logic
-
-        # current_ticket = st.session_state.current_ticket
-        # similar_tickets = st.session_state.similar_tickets
-        #
-        # if not similar_tickets:
-        #     return ""
-        #
-        # rerank_system_prompt = self._create_rerank_system_prompt()
-        # rerank_input_prompt = self._create_rerank_input_prompt(current_ticket, similar_tickets)
-        #
-        # llm = ChatOllama(model=LLM_MODEL_NAME,
-        #                  base_url="http://localhost:11434",
-        #                  verbose=True,
-        #                  temperature=0.1)
-        #
-        # messages = [
-        #     SystemMessage(content=rerank_system_prompt),
-        #     HumanMessage(content=rerank_input_prompt)
-        # ]
-        #
-        # x = llm.invoke(messages).content.strip()
-        # print("Rerank LLM output:", x)
-
         return ""
-
-    @staticmethod
-    def _create_rerank_system_prompt() -> str:
-        rerank_system_prompt = """You are a JSON-only response bot.
-    
-        OUTPUT: Return ONLY a valid JSON array. No text before. No text after. No explanations.
-        
-        Example:
-        [{"key": "KAN-45", "summary": "...", "labels": [], "status": "Done", "resolution": "Fixed", "relevance_reason": "..."}]
-        
-        TASK: Rank similar tickets by relevance to the current ticket. Return top 5 only.
-        
-        RULES:
-        - Compare: summary, description, labels, issue type, status
-        - Include: key, summary, labels, status, resolution, relevance_reason
-        - Output ONLY the JSON array"""
-
-        return rerank_system_prompt
-
-    @staticmethod
-    def _create_rerank_input_prompt(current_ticket: Dict, similar_tickets: List) -> str:
-        rerank_input_prompt = f"""
-        Current ticket:
-        {current_ticket["summary"] + "\n" + current_ticket["description"]}
-        
-        List of similar tickets to rank:
-        {json.dumps(similar_tickets, indent=2)}
-
-        RESPOND WITH ONLY A JSON ARRAY OF THE TOP 5 MOST RELEVANT TICKETS. NO OTHER TEXT."""
-
-        return rerank_input_prompt
 
     def _generate_analysis(self, logs_analysis: List[LogAnalysisOutput]) -> str:
         """Generate final ticket analysis with LLM using similar tickets."""
         final_analysis_system_prompt = self._create_final_analysis_system_prompt()
         final_analysis_input_prompt = self._create_final_analysis_input_prompt()
-        llm = ChatOllama(model=LLM_MODEL_NAME, base_url=OLLAMA_BASE_URL, temperature=0.1)
+        llm = AzureChatOpenAI(
+            azure_deployment=AZURE_OPENAI_LLM_DEPLOYMENT,
+            azure_endpoint=AZURE_OPENAI_ENDPOINT,
+            openai_api_version=AZURE_OPENAI_API_VERSION,
+            openai_api_key=AZURE_OPENAI_API_KEY,
+            temperature=AZURE_OPENAI_TEMPERATURE,
+        )
         structured_llm = llm.with_structured_output(FinalAnalysisOutput)
         messages = [
             SystemMessage(content=final_analysis_system_prompt),
@@ -388,9 +377,9 @@ class JiraChatBot:
         final_analysis_system_prompt = """
         You are an expert Jira analyst assisting software engineers.
 
-        Your task is to analyze a Jira ticket together with its top 5 most similar past tickets and produce a 
+        Your task is to analyze a Jira ticket together with its top 5 most similar past tickets and produce a
         structured, factual analysis.
-        
+
         Rules:
         - Base all conclusions ONLY on the information provided.
         - Do NOT hallucinate missing details.
@@ -399,7 +388,7 @@ class JiraChatBot:
         - Do not invent Jira ticket keys, statuses, or links.
         - Use Markdown formatting exactly as requested.
         - When explaining similarity, be specific (shared error message, component, symptom, environment, etc.).
-        
+
         Output format must strictly follow the sections and headings provided.
         """
 
@@ -429,13 +418,13 @@ class JiraChatBot:
         - CURRENT TICKET: {current_ticket['key']}
         - Summary: {current_ticket['summary'][:2400]}...
         - Description: {current_ticket['description'][:1600]}...
-        - Status: {current_ticket['status']} 
+        - Status: {current_ticket['status']}
         - Priority: {current_ticket['priority']}
         - Labels: {current_ticket['labels']}
-        
+
         Top 5 most similar Jira tickets (already reranked by relevance):
         {similar_tickets_formatted}
-        
+
         HARD RULES (must follow):
         - You MUST return `similar_tickets` with EXACTLY {similat_tickets_num} items.
         - You MUST include EVERY provided similar ticket key exactly once.
@@ -444,15 +433,15 @@ class JiraChatBot:
           - Return an empty list for similar_tickets: []
           - Do NOT mention any other Jira ticket keys in any section
           - Any similarity_reason/solutions based on similar tickets must be "unknown"
-        
-        IMPORTANT: For each similar ticket, provide a SPECIFIC similarity_reason explaining 
-        what EXACTLY makes it similar (e.g., "Same API endpoint failure", "Identical NPE in UserService.java", 
+
+        IMPORTANT: For each similar ticket, provide a SPECIFIC similarity_reason explaining
+        what EXACTLY makes it similar (e.g., "Same API endpoint failure", "Identical NPE in UserService.java",
         "Both involve timeout on database connection"). Do NOT use generic phrases like "shared error patterns".
         If no clear similarity exists, say "Low similarity - retrieved by vector search only".
-        
+
         Jira base URL:
         {JIRA_BASE_URL}
-        
+
         """
 
         return final_analysis_input_prompt
@@ -542,7 +531,7 @@ class JiraChatBot:
         # Current ticket exists but no key found in user input
         # ------------------------
         if not potential_keys:
-            # Ambiguous → ask LLM
+            # Ambiguous -> ask LLM
             llm_result = self._classify_intent_with_llm(user_msg)
 
             if llm_result == IntentClassification.UNRELATED_CHAT.value:
@@ -584,7 +573,7 @@ class JiraChatBot:
 
         Use the following rules:
         - If the message contains a new Jira ticket key (different from current), classify as analyze_new_ticket.
-        - If the message references "this ticket" or "the ticket" and there is a current ticket, classify as 
+        - If the message references "this ticket" or "the ticket" and there is a current ticket, classify as
         follow_up_on_current_ticket.
         - If neither of the above, classify as unrelated_chat.
 
@@ -652,7 +641,7 @@ class JiraChatBot:
         follow_up_system_prompt = """You are a Jira support assistant.
         You are continuing an existing discussion about the SAME Jira ticket.
         Use the provided context about the current ticket and recent conversation history to answer user questions.
-        
+
         Rules:
         - Do NOT re-summarize the ticket unless explicitly asked
         - Focus only on the user's latest question
@@ -668,14 +657,14 @@ class JiraChatBot:
         ticket = st.session_state.current_ticket
 
         follow_up_input_prompt = f"""
-        Current ticket info: 
+        Current ticket info:
         Ticket Key: {ticket['key']}
         Summary: {ticket['summary'][:2400]}
         Description: {ticket['description'][:500]}
         Status: {ticket['status']}
         Priority: {ticket['priority']}
         Created: {ticket.get('created', 'N/A')}
-        
+
         User message: "{user_msg}"
 
         Using the context above, provide a concise and accurate response to the user's question about the current ticket.
@@ -685,7 +674,7 @@ class JiraChatBot:
 
 
 if __name__ == "__main__":
-    jira_chatbot = JiraChatBot()
+    jira_chatbot = OpenAIJiraChatBot()
     try:
         jira_chatbot.run()
     finally:

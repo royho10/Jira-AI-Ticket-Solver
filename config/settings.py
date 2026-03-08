@@ -14,9 +14,26 @@ LLM_MODEL_NAME = "llama3"
 OLLAMA_BASE_URL = "http://localhost:11434"
 
 # =============================================================================
+# Azure OpenAI Configuration (loaded from environment)
+# =============================================================================
+import os
+AZURE_OPENAI_ENDPOINT = os.environ.get("AZURE_OPENAI_ENDPOINT")
+AZURE_OPENAI_API_KEY = os.environ.get("AZURE_OPENAI_API_KEY")
+AZURE_OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-08-01-preview")
+
+# Azure OpenAI Deployment Names
+AZURE_OPENAI_LLM_DEPLOYMENT = os.environ.get("AZURE_OPENAI_LLM_DEPLOYMENT", "gpt-5-nano")
+AZURE_OPENAI_EMBEDDING_DEPLOYMENT = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-small")
+
+# LLM Temperature Configuration
+# Note: gpt-5-nano only supports temperature=1.0
+AZURE_OPENAI_TEMPERATURE = 1.0
+
+# =============================================================================
 # Weaviate Configuration
 # =============================================================================
 JIRA_COLLECTION_NAME = "JiraCollection"
+OPENAI_JIRA_COLLECTION_NAME = "JiraCollection"
 
 # =============================================================================
 # Generic Limits

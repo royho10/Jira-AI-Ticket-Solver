@@ -1,87 +1,61 @@
 import base64
 
 from concurrent.futures import TimeoutError
-from langchain_ollama import OllamaEmbeddings
+from langchain_openai import AzureOpenAIEmbeddings, AzureChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
-from langchain_ollama import ChatOllama
 from langsmith import traceable
-from pydantic import BaseModel, Field
 from threading import local
 from typing import List, Tuple, Dict, Any, Optional
 from weaviate.classes.data import DataObject
 
 from config.settings import (
-    OLLAMA_BASE_URL,
     LLM_CALL_TIMEOUT_SECONDS,
+    AZURE_OPENAI_ENDPOINT,
+    AZURE_OPENAI_API_KEY,
+    AZURE_OPENAI_API_VERSION,
+    AZURE_OPENAI_LLM_DEPLOYMENT,
+    AZURE_OPENAI_EMBEDDING_DEPLOYMENT,
+    AZURE_OPENAI_TEMPERATURE,
 )
 from utils.file_utils import extract_content_from_zip, extract_content_from_tar, extract_content_from_rar
 from utils.jira_client import JiraIssue, JiraAttachment, JiraClient, JiraRelatedIssue, JiraComment
 
-LOG_FILE_TYPES = ('.log', '.txt', '.out', '.err', '.trace', '.debug', '.zip', '.tar', '.gz', '.tgz', '.tar.gz', '.rar')
-IMAGE_FILE_TYPES = ('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tiff')
-
-# Ticket processing-specific constants
-MAX_LOG_FILES_TO_PROCESS = 20
-MAX_LINES_PER_LOG = 50
-MAX_LOGS_PER_LLM_CALL = 3
-CONTEXT_LINES_BEFORE_ERROR = 10
-CONTEXT_LINES_AFTER_ERROR = 20
-MAX_WORDS_IN_COMMENTS = 400
-
-AUTOMATION_FOR_JIRA_COMMENT_AUTHOR = "Automation for Jira"
-
+# Import Pydantic models from the Ollama version
+from utils.jira_ticket_processing import (
+    ImageAnalysisOutput,
+    ErrorInLog,
+    LogAnalysisOutput,
+    FinalIssueSummeryOutput,
+    LOG_FILE_TYPES,
+    IMAGE_FILE_TYPES,
+    MAX_LOG_FILES_TO_PROCESS,
+    MAX_LINES_PER_LOG,
+    CONTEXT_LINES_BEFORE_ERROR,
+    CONTEXT_LINES_AFTER_ERROR,
+    MAX_WORDS_IN_COMMENTS,
+    AUTOMATION_FOR_JIRA_COMMENT_AUTHOR,
+)
 
 _thread_local = local()
 
 
-class ImageAnalysisOutput(BaseModel):
-    """Structured output for image analysis."""
-    error_messages: Optional[str] = Field(default=None, description="Visible error messages in the image")
-    summary: str = Field(description="Brief summary of what is visible in the image")
-
-
-class ErrorInLog(BaseModel):
-    """Structured representation of an error found in logs."""
-    source_code_filename: Optional[str] = Field(
-        description="Python source file (.py) mentioned in the error, e.g. 'main.py'. Leave null if none."
-    )
-    error_lines: str = Field(
-        description="Copy the EXACT line(s) from the log that contain 'ERROR'. Do not paraphrase or summarize."
-    )
-    context: str = Field(
-        description="What went wrong in 1-2 sentences. Example: 'Database connection failed due to timeout.'"
-    )
-
-
-class LogAnalysisOutput(BaseModel):
-    """Structured output for log analysis."""
-    log_filename: str = Field(description="Name of the log file (.log/.txt suffix)")
-    errors: List[ErrorInLog] = Field(min_length=1,
-                                     description="List of extracted errors with context. "
-                                                 "Must contain at least one error if ERROR "
-                                                 "lines exist in the input.")
-
-
-class FinalIssueSummeryOutput(BaseModel):
-    issue_summery: str = Field(description="up to 4 sentences final concise summary of the issue")
-    main_issues: List[str] = Field(description="A list of the main issues found in the jira ticket")
-    likely_root_causes: List[str] = Field(description="A list of concise root causes if explicitly stated, otherwise 'unknown'")
-    comments: str = Field(description="steps taken, key points, and any additional relevant info from comments")
-
-
-class JiraIssueLLMProcessor:
+class OpenAIJiraIssueLLMProcessor:
     """
-    Processes Jira issues using LLMs and VLMs to generate summaries and extract information.
+    Processes Jira issues using OpenAI LLMs to generate summaries and extract information.
+    This is the OpenAI version of JiraIssueLLMProcessor.
     """
 
-    def __init__(self, llm_model_name, vlm_model_name, embedding_model_name = None):
+    def __init__(self, llm_deployment=None, vlm_deployment=None, embedding_deployment=None):
         self.jira_client = JiraClient()
-        self.llm_model_name = llm_model_name
-        self.vlm_model_name = vlm_model_name
-        if embedding_model_name:
-            self.embedding_model = OllamaEmbeddings(
-                model=embedding_model_name,
-                base_url=OLLAMA_BASE_URL
+        self.llm_deployment = llm_deployment or AZURE_OPENAI_LLM_DEPLOYMENT
+        self.vlm_deployment = vlm_deployment or AZURE_OPENAI_LLM_DEPLOYMENT  # Same deployment handles vision
+        embedding_deploy = embedding_deployment or AZURE_OPENAI_EMBEDDING_DEPLOYMENT
+        if embedding_deploy:
+            self.embedding_model = AzureOpenAIEmbeddings(
+                azure_deployment=embedding_deploy,
+                azure_endpoint=AZURE_OPENAI_ENDPOINT,
+                api_key=AZURE_OPENAI_API_KEY,
+                openai_api_version=AZURE_OPENAI_API_VERSION,
             )
 
     def process_issue(self, jira_issue: JiraIssue, status_callback: Any = None) -> Tuple[str, List[LogAnalysisOutput]]:
@@ -101,10 +75,8 @@ class JiraIssueLLMProcessor:
         summarized_attachments = f"{log_summaries_as_text}\n\n{image_summaries_as_text}"
         comments_text = self._process_comments(comments)
         related_issues_text = self._process_related_issues(related_issues)
-        # TODO: think about github links in the future
 
         if status_callback:
-            # update status for UI
             status_callback.markdown("🧠 **Generating ticket summary...**")
         issue_summary: FinalIssueSummeryOutput = self._create_final_issue_summary(jira_issue,
                                                                                   comments_text,
@@ -114,25 +86,30 @@ class JiraIssueLLMProcessor:
 
         return issue_summary_as_text, log_summaries
 
-    def _get_llm(self) -> ChatOllama:
+    def _get_llm(self) -> AzureChatOpenAI:
         # Reuse one LLM client per thread to reduce socket churn
-        if not hasattr(_thread_local, "llm") or _thread_local.llm is None:
-            _thread_local.llm = ChatOllama(
-                model=self.llm_model_name,
-                base_url=OLLAMA_BASE_URL,
-                temperature=0.1,
+        if not hasattr(_thread_local, "azure_llm") or _thread_local.azure_llm is None:
+            _thread_local.azure_llm = AzureChatOpenAI(
+                azure_deployment=self.llm_deployment,
+                azure_endpoint=AZURE_OPENAI_ENDPOINT,
+                openai_api_version=AZURE_OPENAI_API_VERSION,
+                openai_api_key=AZURE_OPENAI_API_KEY,
+                temperature=AZURE_OPENAI_TEMPERATURE,
             )
-        return _thread_local.llm
+        return _thread_local.azure_llm
 
-    def _get_vlm(self) -> ChatOllama:
+    def _get_vlm(self) -> AzureChatOpenAI:
         # Reuse one VLM client per thread to reduce socket churn
-        if not hasattr(_thread_local, "vlm") or _thread_local.vlm is None:
-            _thread_local.vlm = ChatOllama(
-                model=self.vlm_model_name,
-                base_url=OLLAMA_BASE_URL,
-                temperature=0.1,
+        # For Azure OpenAI, the same deployment handles both text and vision
+        if not hasattr(_thread_local, "azure_vlm") or _thread_local.azure_vlm is None:
+            _thread_local.azure_vlm = AzureChatOpenAI(
+                azure_deployment=self.vlm_deployment,
+                azure_endpoint=AZURE_OPENAI_ENDPOINT,
+                openai_api_version=AZURE_OPENAI_API_VERSION,
+                openai_api_key=AZURE_OPENAI_API_KEY,
+                temperature=AZURE_OPENAI_TEMPERATURE,
             )
-        return _thread_local.vlm
+        return _thread_local.azure_vlm
 
     def _process_attachments(self, attachments: List[JiraAttachment], issue_key: str, status_callback: Any = None) -> (
             Tuple)[List[str], List[LogAnalysisOutput]]:
@@ -148,19 +125,17 @@ class JiraIssueLLMProcessor:
 
         for idx, attachment in enumerate(image_attachments):
             if status_callback:
-                # update status for UI
                 status_callback.markdown(f"🖼️ **Analyzing images and screenshots... ({idx + 1}/{len(image_attachments)})**")
             image_summaries.append(self._process_image_attachment(attachment))
         for idx, attachment in enumerate(log_attachments):
             if status_callback:
-                # update status for UI
                 status_callback.markdown(f"📋 **Analyzing log files... can take some time... ({idx + 1}/{len(log_attachments)})**")
             log_summaries += self._process_log_attachment(attachment, issue_key)
 
         return image_summaries, log_summaries
 
     def _process_image_attachment(self, attachment: JiraAttachment) -> str:
-        """Process image attachment using llm model to summarize and extract it into text"""
+        """Process image attachment using OpenAI model to summarize and extract it into text"""
         try:
             image = JiraClient().download_attachment(attachment.id)
             # Convert image bytes to base64 string
@@ -173,7 +148,7 @@ class JiraIssueLLMProcessor:
             content_parts.append(text_part)
             image_part = {
                 "type": "image_url",
-                "image_url": f"data:image/jpeg;base64,{image_b64}",
+                "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"},
             }
             content_parts.append(image_part)
             vlm = self._get_vlm()
@@ -215,7 +190,7 @@ class JiraIssueLLMProcessor:
             - visible error messages
             - UI text or warnings
             - any system dialogs
-            
+
             Rules:
             - don't try to understand the root cause, only describe what you see.
             - answer should be under 100 words.
@@ -403,42 +378,6 @@ class JiraIssueLLMProcessor:
         summary.errors = filtered_errors
         return summary
 
-    def _aggregate_log_summaries(self, summaries: List[str]) -> str:
-        """Aggregate multiple log batch summaries into one"""
-        system_prompt = """You merge multiple error extraction results into a single consolidated report.
-
-    RULES:
-    - Combine all errors from all inputs
-    - Remove duplicates (same error in same file)
-    - Keep the exact format: File, Error, Context
-    - List patterns only once at the end
-    - Do NOT add commentary"""
-
-        user_prompt = f"""Merge these error reports into one consolidated report.
-    
-    ---
-    
-    Use this format:
-    
-    **Errors:**
-    - File: `[log filename (files with .log/.txt suffix)]`
-      File in code: `[source code filename (files with .py suffix)]` if exists. if not, skip this line.
-      Error: "[error lines]"
-      Context: [description]
-
-    ---
-    REPORTS TO MERGE:
-    {chr(10).join(summaries)}
-    """
-
-        llm = self._get_llm()
-        messages = [
-            SystemMessage(content=system_prompt),
-            HumanMessage(content=user_prompt)
-        ]
-        response = llm.invoke(messages).content
-        return response.strip()
-
     @staticmethod
     def _create_log_summery_system_prompt() -> str:
         """Create system prompt for log summarization"""
@@ -453,16 +392,16 @@ class JiraIssueLLMProcessor:
            - Merge such errors into one entry, and include the most recent timestamp.
            - Ensure the context remains accurate and relevant.
 
-        
+
         EXAMPLE INPUT:
         2024-01-15 10:23:45 ERROR controller.py:142 - Failed to connect to database: timeout
         2024-01-15 10:24:00 ERROR controller.py:142 - Failed to connect to database: timeout
-        
+
         EXAMPLE OUTPUT:
         - error_lines: "2024-01-15 10:24:00 ERROR controller.py:142 - Failed to connect to database: timeout"
         - source_code_filename: "controller.py"
         - context: "Database connection failed due to a timeout error."
-        
+
         remove any duplicate errors found in the same log file.
         DO NOT summarize or shorten error_lines. Copy exactly."""
 
@@ -473,12 +412,12 @@ class JiraIssueLLMProcessor:
         """Create user prompt for log summarization"""
 
         return f"""Parse these log snippets and extract ALL error lines.
-        
+
         Remember:
         - error_lines = exact copy of the ERROR line from above
         - context = brief explanation of what went wrong
         - source_code_filename = any .py file mentioned (or null)
-                
+
         LOG TO ANALYZE:
         {filtered_logs[0]}
         """
@@ -496,79 +435,6 @@ class JiraIssueLLMProcessor:
             result_lines.append("")  # Add an empty line for better readability
 
         return "\n".join(result_lines).strip()
-
-    def _aggregate_attachment_summaries(self, image_summaries: List[str], log_summaries: List[str]) -> str:
-        """Aggregate multiple attachment summaries into one final summary"""
-        aggregate_attachments_system_prompt = self._create_aggregate_attachments_system_propmt()
-        aggregate_attachments_prompt = self._create_aggregate_attachments_propmt(image_summaries, log_summaries)
-        llm = self._get_llm()
-        messages = [
-            SystemMessage(content=aggregate_attachments_system_prompt),
-            HumanMessage(content=aggregate_attachments_prompt)
-        ]
-
-        return llm.invoke(messages).content.strip()
-
-    @staticmethod
-    def _create_aggregate_attachments_system_propmt() -> str:
-        """Create system prompt for aggregating attachment summaries"""
-        aggregate_attachments_system_propmt = """
-        You summarize attachment analyses from Jira tickets.
-
-        Rules:
-        - Be concise and factual
-        - Do not hallucinate or invent details
-        - Only use information explicitly present in the input summaries
-        - If information is missing or unclear, say "unknown"
-        - Do not repeat the same point multiple times
-        - Merge similar findings into a single clear statement
-        - Do not speculate about root causes unless they were explicitly stated in the input
-        - Keep the result short and readable
-        """
-        return aggregate_attachments_system_propmt
-
-    @staticmethod
-    def _create_aggregate_attachments_propmt(image_summaries: List[str], log_summaries: List[str]) -> str:
-        """Create user prompt for aggregating attachment summaries"""
-        aggregate_attachments_propmt = f"""
-        Summarize the following attachment summaries into a single consolidated summary.
-
-        The input consists of summaries produced from:
-        - log files
-        - screenshots
-        
-        Your task:
-        - Combine overlapping findings
-        - Highlight key errors and warnings
-        - Mention all errors found in the logs exactly as they are, with their context - the filename of the log 
-        (.log, .txt files), the filename of where the error was found in the code (.py files), and the understanding of 
-        the error itself
-        - Mention any explicitly stated root causes
-        - Mention affected components/services/log files
-        - Keep the description of the images
-        
-        ---
-        
-        YOU MUST USE THIS EXACT FORMAT:
-
-        **Errors:**
-        - File: `[filename from bracket prefix - log file name and source code file name]`
-          Error: "[copy the full ERROR line exactly]"
-          Context: [one sentence]
-          
-        **Images:**
-        - [summary of 1-2 sentences per image summary]
-        - key points from screenshots
-        
-        ---
-        
-        Image summaries:
-        {image_summaries}
-        
-        Log summaries:
-        {log_summaries}
-        """
-        return aggregate_attachments_propmt
 
     @staticmethod
     def _process_comments(comments: List[JiraComment]) -> str:
@@ -648,7 +514,7 @@ class JiraIssueLLMProcessor:
         """Create system prompt for final issue summarization"""
         final_issue_summery_system_prompt = """
         You generate final summaries for Jira tickets.
-        
+
         Rules:
         - Be concise, factual, and neutral
         - Do not hallucinate or invent details
@@ -675,12 +541,12 @@ class JiraIssueLLMProcessor:
         Your goal:
         - Provide a clear overview of the issue
         - Highlight confirmed errors or symptoms
-        Mention all errors found in the logs exactly as they are, with their context - the filename of the log 
-        (.log, .txt files), the filename of where the error was found in the code (.py files), and the understanding of 
+        Mention all errors found in the logs exactly as they are, with their context - the filename of the log
+        (.log, .txt files), the filename of where the error was found in the code (.py files), and the understanding of
         the error itself
         - Mention any explicitly stated root causes
         - Reference related issues only if they add useful context
-        
+
         Inputs:
 
         Ticket information:
@@ -693,17 +559,17 @@ class JiraIssueLLMProcessor:
         - Issue Components: {', '.join(jira_issue.components) if jira_issue.components else 'None'}
         - Issue Status: {jira_issue.status or 'Unknown'}
         - Issue Creation Date: {jira_issue.created or 'Unknown'}
-        
-        
-        Issue Comments (chronological, combined): 
+
+
+        Issue Comments (chronological, combined):
         {comments_text}
-        
-        
-        Issue Attachments Summary: 
+
+
+        Issue Attachments Summary:
         {summarized_attachments}
-        
-        
-        Related Issues: 
+
+
+        Related Issues:
         {related_issues_text}
         """
         return final_issue_summery_prompt
