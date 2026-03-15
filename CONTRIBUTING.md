@@ -23,7 +23,7 @@ pip install -r requirements.txt
 
 ```bash
 cp .env.example .env
-# Edit .env with your Jira credentials
+# Edit .env with your Jira and Azure OpenAI credentials
 ```
 
 ### 4. Start Required Services
@@ -36,16 +36,6 @@ docker run -d \
   cr.weaviate.io/semitechnologies/weaviate:latest
 ```
 
-**Ollama (LLM Server):**
-```bash
-ollama serve
-
-# In another terminal, pull required models
-ollama pull llama3
-ollama pull qwen2.5vl:7b
-ollama pull nomic-embed-text
-```
-
 ## Code Structure
 
 ### Module Responsibilities
@@ -54,22 +44,20 @@ ollama pull nomic-embed-text
 |--------|---------|
 | `config/settings.py` | Centralized configuration constants |
 | `utils/jira_client.py` | Jira API client and Pydantic data models |
-| `utils/jira_ticket_processing.py` | LLM/VLM processing logic (Ollama) |
 | `utils/openai_jira_ticket_processing.py` | LLM/VLM processing logic (Azure OpenAI) |
 | `utils/file_utils.py` | Archive extraction utilities |
-| `indexer/index_jira_tickets.py` | Batch indexing pipeline (Ollama) |
-| `indexer/openai_index_jira_tickets.py` | Batch indexing pipeline (Azure OpenAI) |
-| `app/chatbot.py` | Streamlit UI (Ollama) |
-| `app/openai_chatbot.py` | Streamlit UI (Azure OpenAI) |
+| `utils/llm_logger.py` | LLM call logging |
+| `indexer/openai_index_jira_tickets.py` | Batch indexing pipeline |
+| `app/openai_chatbot.py` | Streamlit UI |
 
 ### Directory Structure
 
 ```
 Jira-AI-Ticket-Solver/
-├── app/                    # Web interfaces (chatbot.py, openai_chatbot.py)
-├── config/                 # Configuration (Ollama + Azure OpenAI settings)
-├── indexer/                # Batch processing (Ollama + Azure OpenAI indexers)
-├── utils/                  # Shared utilities (Ollama + Azure OpenAI processors)
+├── app/                    # Web interface (openai_chatbot.py)
+├── config/                 # Configuration (Azure OpenAI settings)
+├── indexer/                # Batch processing (indexer)
+├── utils/                  # Shared utilities (processor, Jira client)
 ├── requirements.txt        # Dependencies
 └── .env.example           # Environment template
 ```
@@ -81,23 +69,16 @@ Jira-AI-Ticket-Solver/
 All shared constants are centralized here:
 
 ```python
-# Ollama Model Configuration
-EMBEDDING_MODEL_NAME = "nomic-embed-text-v2-moe"
-VLM_MODEL_NAME = "qwen2.5vl:7b"
-LLM_MODEL_NAME = "llama3"
-OLLAMA_BASE_URL = "http://localhost:11434"
-
 # Azure OpenAI Configuration (loaded from environment)
 import os
 AZURE_OPENAI_ENDPOINT = os.environ.get("AZURE_OPENAI_ENDPOINT")
 AZURE_OPENAI_API_KEY = os.environ.get("AZURE_OPENAI_API_KEY")
-AZURE_OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-02-01")
-AZURE_OPENAI_LLM_DEPLOYMENT = os.environ.get("AZURE_OPENAI_LLM_DEPLOYMENT", "gpt-4o-mini")
+AZURE_OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-08-01-preview")
+AZURE_OPENAI_LLM_DEPLOYMENT = os.environ.get("AZURE_OPENAI_LLM_DEPLOYMENT", "gpt-5-nano")
 AZURE_OPENAI_EMBEDDING_DEPLOYMENT = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-small")
 
-# Weaviate Configuration (separate collections due to different embedding dimensions)
-JIRA_COLLECTION_NAME = "JiraCollection"           # Ollama: 768 dims
-OPENAI_JIRA_COLLECTION_NAME = "JiraCollectionOpenAI"  # Azure OpenAI: 1536 dims
+# Weaviate Configuration
+JIRA_COLLECTION_NAME = "JiraCollection"
 
 # Generic Limits
 MAX_EMBEDDINGS_INPUT_CHARS = 4000
@@ -114,33 +95,20 @@ LLM_CALL_TIMEOUT_SECONDS = 60
 ### Run the Indexer
 
 ```bash
-# Ollama indexer (fully local)
-python -m indexer.index_jira_tickets
-
-# Azure OpenAI indexer (requires Azure OpenAI credentials)
 python -m indexer.openai_index_jira_tickets
 
-# To customize, modify the JQL in the respective indexer's main()
+# To customize, modify the JQL in the indexer's main()
 ```
 
 ### Run the Chatbot
 
 ```bash
-# Ollama chatbot (fully local)
-streamlit run app/chatbot.py
-
-# Azure OpenAI chatbot (requires Azure OpenAI credentials)
 streamlit run app/openai_chatbot.py
 ```
-
-**Note:** Each chatbot queries its corresponding Weaviate collection. Make sure to index tickets with the matching indexer first.
 
 ### Verify Services
 
 ```bash
-# Check Ollama
-curl http://localhost:11434/api/tags
-
 # Check Weaviate
 curl http://localhost:8080/v1/.well-known/ready
 ```
@@ -161,7 +129,7 @@ class LogAnalysisOutput(BaseModel):
 
 Usage with LangChain:
 ```python
-llm = ChatOllama(model=model_name, base_url=OLLAMA_BASE_URL)
+llm = AzureChatOpenAI(azure_deployment=deployment, ...)
 structured_llm = llm.with_structured_output(LogAnalysisOutput)
 result = structured_llm.invoke(messages)
 ```
@@ -175,10 +143,10 @@ from threading import local
 
 _thread_local = local()
 
-def _get_llm(self) -> ChatOllama:
-    if not hasattr(_thread_local, "llm") or _thread_local.llm is None:
-        _thread_local.llm = ChatOllama(...)
-    return _thread_local.llm
+def _get_llm(self) -> AzureChatOpenAI:
+    if not hasattr(_thread_local, "azure_llm") or _thread_local.azure_llm is None:
+        _thread_local.azure_llm = AzureChatOpenAI(...)
+    return _thread_local.azure_llm
 ```
 
 ### 3. Batch Weaviate Operations
@@ -229,12 +197,12 @@ for attachment in attachments:
 1. **Test Indexer:**
    ```bash
    # Modify JQL to test with small dataset
-   python -m indexer.index_jira_tickets
+   python -m indexer.openai_index_jira_tickets
    ```
 
 2. **Test Chatbot:**
    ```bash
-   streamlit run app/chatbot.py
+   streamlit run app/openai_chatbot.py
    # Enter a known ticket key
    # Verify analysis output
    ```
@@ -315,7 +283,7 @@ def extract_content_from_zip(
 
 ### Before Submitting
 
-1. **Test your changes** locally with both chatbot interfaces
+1. **Test your changes** locally with the chatbot interface
 2. **Verify no regressions** in existing functionality
 3. **Update documentation** if adding new features or changing behavior
 4. **Check for hardcoded values** - use `config/settings.py` for shared constants
@@ -352,7 +320,7 @@ Add image analysis timeout handling
 
 ### Adding a New Pydantic Model
 
-1. Define in appropriate file (usually `jira_ticket_processing.py`)
+1. Define in `openai_jira_ticket_processing.py`
 2. Use `Field()` with descriptions for LLM structured output
 3. Add type hints
 
@@ -364,23 +332,22 @@ class NewOutputModel(BaseModel):
 
 ### Adding a New Processing Step
 
-1. Create processing method in `JiraIssueLLMProcessor`
+1. Create processing method in `OpenAIJiraIssueLLMProcessor`
 2. Add system/user prompt methods
 3. Call from `process_issue()` pipeline
 4. Update `_parse_final_issue_summary_output_to_text()` if output changes
 
 ### Modifying Weaviate Schema
 
-1. Update `_setup_collection()` in the respective indexer file
+1. Update `_setup_collection()` in the indexer file
 2. Delete existing collection or use new name for testing
 3. Re-index tickets
 
 ```python
-# To delete existing collections (in Python REPL)
+# To delete existing collection (in Python REPL)
 import weaviate
 client = weaviate.connect_to_local()
-client.collections.delete("JiraCollection")       # Ollama collection
-client.collections.delete("JiraCollectionOpenAI") # OpenAI collection
+client.collections.delete("JiraCollection")
 client.close()
 ```
 
@@ -391,17 +358,6 @@ client.close()
 3. Document in README.md
 
 ## Troubleshooting
-
-### Ollama Connection Issues
-
-```bash
-# Check if Ollama is running
-curl http://localhost:11434/api/tags
-
-# Restart Ollama
-pkill ollama
-ollama serve
-```
 
 ### Weaviate Connection Issues
 
@@ -415,7 +371,7 @@ docker restart <container_id>
 
 ### Memory Issues During Indexing
 
-Reduce concurrent workers in `index_jira_tickets.py`:
+Reduce concurrent workers in `openai_index_jira_tickets.py`:
 
 ```python
 MAX_PROCESS_TICKET_WORKERS = 2  # Reduce from 5

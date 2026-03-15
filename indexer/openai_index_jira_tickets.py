@@ -23,7 +23,7 @@ from config.settings import (
     AZURE_OPENAI_API_VERSION,
     AZURE_OPENAI_LLM_DEPLOYMENT,
     AZURE_OPENAI_EMBEDDING_DEPLOYMENT,
-    OPENAI_JIRA_COLLECTION_NAME,
+    JIRA_COLLECTION_NAME,
     MAX_EMBEDDINGS_INPUT_CHARS,
 )
 from utils.jira_client import JiraClient, JiraIssue
@@ -32,6 +32,7 @@ from utils.openai_jira_ticket_processing import OpenAIJiraIssueLLMProcessor
 # Indexer-specific constants
 WEAVIATE_BATCH_SIZE = 100
 MAX_PROCESS_TICKET_WORKERS = 5
+MAX_EMBEDDINGS_DESCRIPTION_INPUT_CHARS = MAX_EMBEDDINGS_INPUT_CHARS / 2  # Use half of the input space for description, rest for summary
 
 
 class OpenAIJiraIndexer:
@@ -59,13 +60,13 @@ class OpenAIJiraIndexer:
 
     def _setup_collection(self):
         """Setup Weaviate collection schema if not exists"""
-        if self.db_client.collections.exists(OPENAI_JIRA_COLLECTION_NAME):
-            self.jira_collection = self.db_client.collections.get(OPENAI_JIRA_COLLECTION_NAME)
+        if self.db_client.collections.exists(JIRA_COLLECTION_NAME):
+            self.jira_collection = self.db_client.collections.get(JIRA_COLLECTION_NAME)
             return
         else:
             # Create new collection
             self.jira_collection = self.db_client.collections.create(
-                name=OPENAI_JIRA_COLLECTION_NAME,
+                name=JIRA_COLLECTION_NAME,
                 # Configure for similarity search
                 vectorizer_config=wvc.config.Configure.Vectorizer.none(),
                 properties=[
@@ -159,8 +160,11 @@ class OpenAIJiraIndexer:
 
                 print(f"[{ticket_no}/{total}] Done {jira_issue.key}")
 
-                # Embed both summary and description for better similarity matching
-                content_to_embed = (issue_summary + "\n\n" + (jira_issue.description or ""))[:MAX_EMBEDDINGS_INPUT_CHARS]
+                # Embed with description priority, using leftover space for summary
+                desc_text = (jira_issue.description or "")[:int(MAX_EMBEDDINGS_DESCRIPTION_INPUT_CHARS)]
+                remaining = MAX_EMBEDDINGS_INPUT_CHARS - len(desc_text) - 2  # 2 for "\n\n"
+                summary_part = issue_summary[:remaining]
+                content_to_embed = desc_text + "\n\n" + summary_part
                 return jira_issue_processor.create_data_object(base_props, content_to_embed)
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
                 print(f"OpenAI API unavailable, moving to the next issue. error: {e}")

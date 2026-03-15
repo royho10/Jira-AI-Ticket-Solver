@@ -1,12 +1,16 @@
 import base64
+import logging
+import time
 
 from concurrent.futures import TimeoutError
 from langchain_openai import AzureOpenAIEmbeddings, AzureChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
-from langsmith import traceable
+from pydantic import BaseModel, Field
 from threading import local
 from typing import List, Tuple, Dict, Any, Optional
 from weaviate.classes.data import DataObject
+
+logger = logging.getLogger(__name__)
 
 from config.settings import (
     LLM_CALL_TIMEOUT_SECONDS,
@@ -19,22 +23,54 @@ from config.settings import (
 )
 from utils.file_utils import extract_content_from_zip, extract_content_from_tar, extract_content_from_rar
 from utils.jira_client import JiraIssue, JiraAttachment, JiraClient, JiraRelatedIssue, JiraComment
+from utils.llm_logger import log_llm_call
 
-# Import Pydantic models from the Ollama version
-from utils.jira_ticket_processing import (
-    ImageAnalysisOutput,
-    ErrorInLog,
-    LogAnalysisOutput,
-    FinalIssueSummeryOutput,
-    LOG_FILE_TYPES,
-    IMAGE_FILE_TYPES,
-    MAX_LOG_FILES_TO_PROCESS,
-    MAX_LINES_PER_LOG,
-    CONTEXT_LINES_BEFORE_ERROR,
-    CONTEXT_LINES_AFTER_ERROR,
-    MAX_WORDS_IN_COMMENTS,
-    AUTOMATION_FOR_JIRA_COMMENT_AUTHOR,
-)
+LOG_FILE_TYPES = ('.log', '.txt', '.out', '.err', '.trace', '.debug', '.zip', '.tar', '.gz', '.tgz', '.tar.gz', '.rar')
+IMAGE_FILE_TYPES = ('.png', '.jpg', '.jpeg', '.bmp', '.gif', '.tiff')
+
+# Ticket processing-specific constants
+MAX_LOG_FILES_TO_PROCESS = 20
+MAX_LINES_PER_LOG = 50
+CONTEXT_LINES_BEFORE_ERROR = 10
+CONTEXT_LINES_AFTER_ERROR = 20
+MAX_WORDS_IN_COMMENTS = 400
+
+AUTOMATION_FOR_JIRA_COMMENT_AUTHOR = "Automation for Jira"
+
+
+class ImageAnalysisOutput(BaseModel):
+    """Structured output for image analysis."""
+    error_messages: Optional[str] = Field(default=None, description="Visible error messages in the image")
+    summary: str = Field(description="Brief summary of what is visible in the image")
+
+
+class ErrorInLog(BaseModel):
+    """Structured representation of an error found in logs."""
+    source_code_filename: Optional[str] = Field(
+        description="Python source file (.py) mentioned in the error, e.g. 'main.py'. Leave null if none."
+    )
+    error_lines: str = Field(
+        description="Copy the EXACT line(s) from the log that contain 'ERROR'. Do not paraphrase or summarize."
+    )
+    context: str = Field(
+        description="What went wrong in 1-2 sentences. Example: 'Database connection failed due to timeout.'"
+    )
+
+
+class LogAnalysisOutput(BaseModel):
+    """Structured output for log analysis."""
+    log_filename: str = Field(description="Name of the log file (.log/.txt suffix)")
+    errors: List[ErrorInLog] = Field(min_length=1,
+                                     description="List of extracted errors with context. "
+                                                 "Must contain at least one error if ERROR "
+                                                 "lines exist in the input.")
+
+
+class FinalIssueSummeryOutput(BaseModel):
+    issue_summery: str = Field(description="up to 4 sentences final concise summary of the issue")
+    main_issues: List[str] = Field(description="A list of the main issues found in the jira ticket")
+    likely_root_causes: List[str] = Field(description="A list of concise root causes if explicitly stated, otherwise 'unknown'")
+    comments: str = Field(description="steps taken, key points, and any additional relevant info from comments")
 
 _thread_local = local()
 
@@ -70,6 +106,12 @@ class OpenAIJiraIssueLLMProcessor:
         related_issues = jira_issue.related_issues or []
 
         image_summaries, log_summaries = self._process_attachments(attachments, jira_issue.key, status_callback)
+
+        # Extract errors from ticket description text
+        description_errors = self._extract_errors_from_description(jira_issue.description)
+        if description_errors:
+            log_summaries.append(description_errors)
+
         log_summaries_as_text = self._parse_log_analysis_output_to_text(log_summaries)
         image_summaries_as_text = self._parse_image_analysis_output_to_text(image_summaries)
         summarized_attachments = f"{log_summaries_as_text}\n\n{image_summaries_as_text}"
@@ -110,6 +152,70 @@ class OpenAIJiraIssueLLMProcessor:
                 temperature=AZURE_OPENAI_TEMPERATURE,
             )
         return _thread_local.azure_vlm
+
+    def _invoke_with_retry(self, structured_llm, messages, max_retries=3):
+        """Invoke an LLM with exponential backoff retry logic."""
+        for attempt in range(1, max_retries + 1):
+            try:
+                return structured_llm.invoke(messages)
+            except (TimeoutError, ConnectionError) as e:
+                if attempt == max_retries:
+                    raise
+                wait = 2 ** attempt
+                logger.warning(f"LLM call failed (attempt {attempt}/{max_retries}): {e}. Retrying in {wait}s...")
+                time.sleep(wait)
+            except Exception as e:
+                if attempt == max_retries:
+                    raise
+                wait = 2 ** attempt
+                logger.warning(f"LLM call failed (attempt {attempt}/{max_retries}): {e}. Retrying in {wait}s...")
+                time.sleep(wait)
+
+    def _extract_errors_from_description(self, description: str) -> Optional[LogAnalysisOutput]:
+        """Extract error messages, stack traces, and exceptions from ticket description text."""
+        if not description or len(description.strip()) < 20:
+            return None
+
+        system_prompt = """You are an error extraction specialist. Analyze the Jira ticket description below and extract ONLY objective error data.
+
+RULES:
+1. Extract verbatim error messages, stack traces, exception names, and error codes found in the text.
+2. For error_lines: Copy the EXACT error text as written in the description. Do not paraphrase.
+3. For context: Briefly explain what the error means. Flag subjective claims (e.g., "reporter says the DB is down") as "reporter observation" rather than fact.
+4. For source_code_filename: Only include filenames (.py, .java, .js, etc.) explicitly mentioned in the error text.
+5. If no error patterns, stack traces, or exception messages are found, return an EMPTY errors list.
+6. Do NOT treat normal descriptions of symptoms as errors unless they contain actual error messages or stack traces."""
+
+        user_prompt = f"""Extract any error messages, stack traces, or exceptions from this Jira ticket description.
+If there are no actual error messages or stack traces, return an empty errors list.
+
+TICKET DESCRIPTION:
+{description[:3000]}"""
+
+        llm = self._get_llm()
+        structured_llm = llm.with_structured_output(LogAnalysisOutput)
+        messages = [
+            SystemMessage(content=system_prompt),
+            HumanMessage(content=user_prompt)
+        ]
+        try:
+            start = time.time()
+            response = self._invoke_with_retry(structured_llm, messages)
+            duration_ms = int((time.time() - start) * 1000)
+            log_llm_call("error_extraction_from_description", self.llm_deployment, messages, response, duration_ms)
+        except Exception as e:
+            logger.error(f"Failed to extract errors from description: {e}")
+            return None
+
+        if isinstance(response, dict):
+            response = LogAnalysisOutput(**response)
+
+        response.log_filename = "ticket_description"
+
+        if not response.errors:
+            return None
+
+        return response
 
     def _process_attachments(self, attachments: List[JiraAttachment], issue_key: str, status_callback: Any = None) -> (
             Tuple)[List[str], List[LogAnalysisOutput]]:
@@ -157,7 +263,14 @@ class OpenAIJiraIssueLLMProcessor:
                 SystemMessage(content=image_system_prompt),
                 HumanMessage(content=content_parts)
             ]
-            image_summarization = structured_vlm.invoke(messages).summary.strip()
+            start = time.time()
+            result = self._invoke_with_retry(structured_vlm, messages)
+            duration_ms = int((time.time() - start) * 1000)
+            log_llm_call("image_analysis", self.vlm_deployment, [
+                ("System", image_system_prompt),
+                ("Human", f"{image_user_prompt}\n<image: {attachment.filename}>"),
+            ], result, duration_ms)
+            image_summarization = result.summary.strip()
 
             return image_summarization
         except Exception as e:
@@ -336,9 +449,12 @@ class OpenAIJiraIssueLLMProcessor:
             HumanMessage(content=log_summery_prompt)
         ]
         try:
-            response = structured_llm.invoke(messages)
-        except TimeoutError:
-            print(f"   ❌ LLM call timed out after {LLM_CALL_TIMEOUT_SECONDS} seconds for log {log[1]}")
+            start = time.time()
+            response = self._invoke_with_retry(structured_llm, messages)
+            duration_ms = int((time.time() - start) * 1000)
+            log_llm_call("log_parsing", self.llm_deployment, messages, response, duration_ms)
+        except Exception as e:
+            logger.error(f"LLM call failed after retries for log {log[1]}: {e}")
             return None
 
         if isinstance(response, dict):
@@ -503,7 +619,10 @@ class OpenAIJiraIssueLLMProcessor:
             HumanMessage(content=final_issue_summery_prompt)
         ]
 
-        result = structured_llm.invoke(messages)
+        start = time.time()
+        result = self._invoke_with_retry(structured_llm, messages)
+        duration_ms = int((time.time() - start) * 1000)
+        log_llm_call("final_summary", self.llm_deployment, messages, result, duration_ms)
         if isinstance(result, dict):
             result = FinalIssueSummeryOutput(**result)
 

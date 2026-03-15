@@ -6,14 +6,6 @@ File-specific constants should remain in their respective files.
 """
 
 # =============================================================================
-# Model Configuration
-# =============================================================================
-EMBEDDING_MODEL_NAME = "nomic-embed-text-v2-moe"
-VLM_MODEL_NAME = "qwen2.5vl:7b"
-LLM_MODEL_NAME = "llama3"
-OLLAMA_BASE_URL = "http://localhost:11434"
-
-# =============================================================================
 # Azure OpenAI Configuration (loaded from environment)
 # =============================================================================
 import os
@@ -33,10 +25,15 @@ AZURE_OPENAI_TEMPERATURE = 1.0
 # Weaviate Configuration
 # =============================================================================
 JIRA_COLLECTION_NAME = "JiraCollection"
-OPENAI_JIRA_COLLECTION_NAME = "JiraCollection"
 
 # =============================================================================
 # Generic Limits
 # =============================================================================
 MAX_EMBEDDINGS_INPUT_CHARS = 4000
 LLM_CALL_TIMEOUT_SECONDS = 60
+
+# =============================================================================
+# Reranking Configuration
+# =============================================================================
+RERANK_SCORE_THRESHOLD = 5  # 0-10 scale; tickets below this are filtered out
+MAX_SIMILAR_TICKETS_AFTER_RERANK = 5

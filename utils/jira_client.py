@@ -30,7 +30,7 @@ class JiraComment:
         return cls(
             id=comment_data.get("id", ""),
             author_display_name=author.get("displayName", ""),
-            body=comment_data.get("body", {}).get("content", [])[0].get("content", [])[0].get("text", ""),
+            body=extract_text_from_adf(comment_data.get("body", {})),
             created=comment_data.get("created", ""),
             updated=comment_data.get("updated", ""),
         )

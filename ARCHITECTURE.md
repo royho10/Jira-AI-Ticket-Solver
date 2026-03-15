@@ -8,33 +8,33 @@ This document provides detailed technical documentation for the Jira AI Ticket S
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                              CLIENT LAYER                                    │
 │                                                                              │
-│  ┌───────────────────────────────┐   ┌───────────────────────────────────┐  │
-│  │       chatbot.py              │   │       openai_chatbot.py           │  │
-│  │  ┌─────────────────────────┐  │   │  ┌─────────────────────────────┐  │  │
-│  │  │     Streamlit UI        │  │   │  │     Streamlit UI            │  │  │
-│  │  └───────────┬─────────────┘  │   │  └───────────┬─────────────────┘  │  │
-│  │              │                │   │              │                    │  │
-│  │  ┌───────────▼─────────────┐  │   │  ┌───────────▼─────────────────┐  │  │
-│  │  │    JiraChatBot          │  │   │  │    OpenAIJiraChatBot        │  │  │
-│  │  │  • Intent classification│  │   │  │  • Intent classification    │  │  │
-│  │  │  • RAG query (Ollama)   │  │   │  │  • RAG query (Azure OpenAI) │  │  │
-│  │  │  • Final analysis       │  │   │  │  • Final analysis           │  │  │
-│  │  └─────────────────────────┘  │   │  └─────────────────────────────┘  │  │
-│  └───────────────────────────────┘   └───────────────────────────────────┘  │
+│  ┌───────────────────────────────────┐                                      │
+│  │       openai_chatbot.py           │                                      │
+│  │  ┌─────────────────────────────┐  │                                      │
+│  │  │     Streamlit UI            │  │                                      │
+│  │  └───────────┬─────────────────┘  │                                      │
+│  │              │                    │                                      │
+│  │  ┌───────────▼─────────────────┐  │                                      │
+│  │  │    OpenAIJiraChatBot        │  │                                      │
+│  │  │  • Intent classification    │  │                                      │
+│  │  │  • RAG query (Azure OpenAI) │  │                                      │
+│  │  │  • Final analysis           │  │                                      │
+│  │  └─────────────────────────────┘  │                                      │
+│  └───────────────────────────────────┘                                      │
 └─────────────────────────────────────────────────────────────────────────────┘
                                        │
                                        ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                           PROCESSING LAYER                                   │
 │                                                                              │
-│  ┌──────────────────────────────────┐  ┌──────────────────────────────────┐ │
-│  │     JiraIssueLLMProcessor        │  │  OpenAIJiraIssueLLMProcessor     │ │
-│  │   (jira_ticket_processing.py)    │  │ (openai_jira_ticket_processing.py)│ │
-│  │                                  │  │                                  │ │
-│  │  • ChatOllama (llama3)           │  │  • AzureChatOpenAI (gpt-4o-mini) │ │
-│  │  • VLM (qwen2.5vl:7b)            │  │  • Vision (gpt-4o-mini)          │ │
-│  │  • OllamaEmbeddings              │  │  • AzureOpenAIEmbeddings         │ │
-│  └──────────────────────────────────┘  └──────────────────────────────────┘ │
+│  ┌──────────────────────────────────┐                                       │
+│  │  OpenAIJiraIssueLLMProcessor     │                                       │
+│  │ (openai_jira_ticket_processing.py)│                                       │
+│  │                                  │                                       │
+│  │  • AzureChatOpenAI (LLM)        │                                       │
+│  │  • Vision (same deployment)      │                                       │
+│  │  • AzureOpenAIEmbeddings         │                                       │
+│  └──────────────────────────────────┘                                       │
 │                                                                              │
 │  ┌─────────────────────────────────────────────────────────────────────────┐│
 │  │                      file_utils.py                                      ││
@@ -48,17 +48,14 @@ This document provides detailed technical documentation for the Jira AI Ticket S
 │                             DATA LAYER                                       │
 │                                                                              │
 │  ┌─────────────────┐  ┌─────────────────────────────┐  ┌─────────────────┐  │
-│  │   JiraClient    │  │        Weaviate             │  │ Ollama / Azure  │  │
+│  │   JiraClient    │  │        Weaviate             │  │ Azure OpenAI    │  │
 │  │ (jira_client.py)│  │     (Vector Store)          │  │                 │  │
-│  │                 │  │                             │  │ Ollama:         │  │
-│  │ • fetch_issues  │  │ • JiraCollection (Ollama)   │  │ • llama3        │  │
-│  │ • fetch_issue_  │  │   768-dim vectors           │  │ • qwen2.5vl     │  │
-│  │   by_key        │  │                             │  │ • nomic-embed   │  │
-│  │ • download_     │  │ • JiraCollectionOpenAI      │  │                 │  │
-│  │   attachment    │  │   1536-dim vectors          │  │ Azure OpenAI:   │  │
 │  │                 │  │                             │  │ • gpt-4o-mini   │  │
-│  │                 │  │ • near_vector queries       │  │ • text-embed-3  │  │
-│  │                 │  │ • insert_many               │  │   -small        │  │
+│  │ • fetch_issues  │  │ • JiraCollection            │  │   (or custom)   │  │
+│  │ • fetch_issue_  │  │   1536-dim vectors          │  │ • text-embed-3  │  │
+│  │   by_key        │  │                             │  │   -small        │  │
+│  │ • download_     │  │ • near_vector queries       │  │                 │  │
+│  │   attachment    │  │ • insert_many               │  │                 │  │
 │  └─────────────────┘  └─────────────────────────────┘  └─────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -83,13 +80,13 @@ Jira REST API client with Pydantic data models.
 - `extract_text_from_adf(node)` - Atlassian Document Format parser
 - `extract_jira_keys_from_text(text)` - Regex-based key extraction
 
-### `utils/jira_ticket_processing.py`
+### `utils/openai_jira_ticket_processing.py`
 
-LLM/VLM processing engine for ticket analysis.
+LLM/VLM processing engine for ticket analysis using Azure OpenAI.
 
-**Main Class: `JiraIssueLLMProcessor`**
+**Main Class: `OpenAIJiraIssueLLMProcessor`**
 
-Initializes with model names and provides:
+Initializes with deployment names and provides:
 - `process_issue(jira_issue, status_callback)` - Main entry point
 - Thread-local LLM/VLM instances to reduce socket churn
 
@@ -132,11 +129,11 @@ Archive extraction utilities for log file processing.
 
 Returns `List[Tuple[str, str]]` of `(content, filename)` pairs.
 
-### `indexer/index_jira_tickets.py`
+### `indexer/openai_index_jira_tickets.py`
 
 Batch indexing pipeline for building the vector database.
 
-**Main Class: `JiraIndexer`**
+**Main Class: `OpenAIJiraIndexer`**
 
 **Methods:**
 - `index_all(page_size, jql)` - Main indexing loop
@@ -161,11 +158,11 @@ properties=[
 ]
 ```
 
-### `app/chatbot.py`
+### `app/openai_chatbot.py`
 
-Streamlit web interface using Weaviate and Ollama (fully local).
+Streamlit web interface using Azure OpenAI.
 
-**Main Class: `JiraChatBot`**
+**Main Class: `OpenAIJiraChatBot`**
 
 **Intent Classification:**
 ```python
@@ -183,69 +180,28 @@ class IntentClassification(Enum):
 4. If follow-up: continue conversation with context
 5. Display structured analysis with similar tickets
 
-### `app/openai_chatbot.py`
-
-Streamlit web interface using Azure OpenAI (cloud-based).
-
-**Main Class: `OpenAIJiraChatBot`**
-
-Same architecture as `chatbot.py` but uses Azure OpenAI:
-- `AzureChatOpenAI` instead of `ChatOllama`
-- `AzureOpenAIEmbeddings` instead of `OllamaEmbeddings`
-- Queries `JiraCollectionOpenAI` Weaviate collection
-- Uses `OpenAIJiraIssueLLMProcessor` for ticket processing
-
 **Configuration:**
-- LLM: `gpt-4o-mini` (Azure deployment)
-- Vision: `gpt-4o-mini` (same deployment handles vision)
+- LLM: Configurable Azure deployment (default: `gpt-4o-mini`)
+- Vision: Same deployment handles vision
 - Embeddings: `text-embedding-3-small` (Azure deployment)
-
-### `utils/openai_jira_ticket_processing.py`
-
-Azure OpenAI version of the LLM/VLM processing engine.
-
-**Main Class: `OpenAIJiraIssueLLMProcessor`**
-
-Same interface as `JiraIssueLLMProcessor` but uses Azure OpenAI:
-- `AzureChatOpenAI` for LLM calls
-- `AzureOpenAIEmbeddings` for vector generation
-- Reuses Pydantic models from `jira_ticket_processing.py`
-
-### `indexer/openai_index_jira_tickets.py`
-
-Azure OpenAI version of the batch indexing pipeline.
-
-**Main Class: `OpenAIJiraIndexer`**
-
-Same workflow as `JiraIndexer` but:
-- Uses `AzureOpenAIEmbeddings` for vector generation
-- Stores in `JiraCollectionOpenAI` Weaviate collection
-- Uses `OpenAIJiraIssueLLMProcessor` for ticket processing
 
 ### `config/settings.py`
 
 Centralized configuration constants.
 
 ```python
-# Ollama Model Configuration
-EMBEDDING_MODEL_NAME = "nomic-embed-text-v2-moe"
-VLM_MODEL_NAME = "qwen2.5vl:7b"
-LLM_MODEL_NAME = "llama3"
-OLLAMA_BASE_URL = "http://localhost:11434"
-
 # Azure OpenAI Configuration (loaded from environment)
 import os
 AZURE_OPENAI_ENDPOINT = os.environ.get("AZURE_OPENAI_ENDPOINT")
 AZURE_OPENAI_API_KEY = os.environ.get("AZURE_OPENAI_API_KEY")
-AZURE_OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-02-01")
+AZURE_OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-08-01-preview")
 
 # Azure OpenAI Deployment Names
-AZURE_OPENAI_LLM_DEPLOYMENT = os.environ.get("AZURE_OPENAI_LLM_DEPLOYMENT", "gpt-4o-mini")
+AZURE_OPENAI_LLM_DEPLOYMENT = os.environ.get("AZURE_OPENAI_LLM_DEPLOYMENT", "gpt-5-nano")
 AZURE_OPENAI_EMBEDDING_DEPLOYMENT = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-small")
 
 # Weaviate Configuration
 JIRA_COLLECTION_NAME = "JiraCollection"
-OPENAI_JIRA_COLLECTION_NAME = "JiraCollectionOpenAI"
 
 # Generic Limits
 MAX_EMBEDDINGS_INPUT_CHARS = 4000
@@ -260,8 +216,7 @@ LLM_CALL_TIMEOUT_SECONDS = 60
 Jira API ──fetch_issues()──> List[JiraIssue]
                                    │
                                    ▼
-                     JiraIssueLLMProcessor.process_issue()
-                     (or OpenAIJiraIssueLLMProcessor)
+                     OpenAIJiraIssueLLMProcessor.process_issue()
                                    │
                     ┌──────────────┼──────────────┐
                     ▼              ▼              ▼
@@ -273,12 +228,10 @@ Jira API ──fetch_issues()──> List[JiraIssue]
                           Final Summary (LLM)
                                    │
                                    ▼
-                      Embeddings.embed_query()
-                      (Ollama or Azure OpenAI)
+                      AzureOpenAIEmbeddings.embed_query()
                                    │
                                    ▼
                       Weaviate.insert_many(DataObjects)
-                      (JiraCollection or JiraCollectionOpenAI)
 ```
 
 ### Query Flow
@@ -295,7 +248,7 @@ User Input (ticket key/question)
            │    JiraClient.fetch_issue_by_key()
            │         │
            │         ▼
-           │    JiraIssueLLMProcessor.process_issue()
+           │    OpenAIJiraIssueLLMProcessor.process_issue()
            │         │
            │         ▼
            │    Weaviate.near_vector(embedding)
@@ -320,7 +273,7 @@ User Input (ticket key/question)
 
 1. Download attachment via Jira API
 2. Convert to base64
-3. Send to VLM with structured output schema
+3. Send to Azure OpenAI with structured output schema
 4. Extract `ImageAnalysisOutput` (error_messages, summary)
 
 ### Log Analysis (LLM)
@@ -356,7 +309,7 @@ User Input (ticket key/question)
 
 ## Threading Model
 
-### Indexer (`index_jira_tickets.py`)
+### Indexer (`openai_index_jira_tickets.py`)
 
 Uses `ThreadPoolExecutor` for parallel ticket processing:
 
@@ -376,22 +329,23 @@ LLM/VLM clients are stored thread-locally to avoid socket churn:
 ```python
 _thread_local = local()
 
-def _get_llm(self) -> ChatOllama:
-    if not hasattr(_thread_local, "llm") or _thread_local.llm is None:
-        _thread_local.llm = ChatOllama(...)
-    return _thread_local.llm
+def _get_llm(self) -> AzureChatOpenAI:
+    if not hasattr(_thread_local, "azure_llm") or _thread_local.azure_llm is None:
+        _thread_local.azure_llm = AzureChatOpenAI(...)
+    return _thread_local.azure_llm
 ```
 
 ## Error Handling
 
 ### Network Errors
-- `requests.exceptions.ConnectionError` - Ollama/Jira unavailable
+- `requests.exceptions.ConnectionError` - Azure OpenAI/Jira unavailable
 - `requests.exceptions.Timeout` - API timeouts
 - `requests.exceptions.HTTPError` - 404 for missing tickets
 
 ### Processing Errors
 - Graceful degradation: skip failed attachments, continue processing
 - Timeout protection: `LLM_CALL_TIMEOUT_SECONDS = 60`
+- Retry logic with exponential backoff for LLM calls
 - Structured error messages to UI
 
 ### Archive Extraction Errors
@@ -407,39 +361,22 @@ def _get_llm(self) -> ChatOllama:
 | `ATLASSIAN_INSTANCE_URL` | Yes | Jira instance base URL |
 | `ATLASSIAN_EMAIL` | Yes | Jira account email |
 | `ATLASSIAN_API_TOKEN` | Yes | Jira API token |
-| `AZURE_OPENAI_ENDPOINT` | For Azure OpenAI | Azure OpenAI resource endpoint |
-| `AZURE_OPENAI_API_KEY` | For Azure OpenAI | Azure OpenAI API key |
-| `AZURE_OPENAI_API_VERSION` | For Azure OpenAI | Azure API version (default: 2024-02-01) |
-| `AZURE_OPENAI_LLM_DEPLOYMENT` | For Azure OpenAI | LLM deployment name (default: gpt-4o-mini) |
-| `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | For Azure OpenAI | Embedding deployment name (default: text-embedding-3-small) |
+| `AZURE_OPENAI_ENDPOINT` | Yes | Azure OpenAI resource endpoint |
+| `AZURE_OPENAI_API_KEY` | Yes | Azure OpenAI API key |
+| `AZURE_OPENAI_API_VERSION` | No | Azure API version (default: 2024-08-01-preview) |
+| `AZURE_OPENAI_LLM_DEPLOYMENT` | No | LLM deployment name (default: gpt-5-nano) |
+| `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | No | Embedding deployment name (default: text-embedding-3-small) |
 
 ### Settings Constants
-
-**Ollama Configuration:**
-
-| Constant | Default | Description |
-|----------|---------|-------------|
-| `EMBEDDING_MODEL_NAME` | `nomic-embed-text-v2-moe` | Ollama embedding model (768 dims) |
-| `VLM_MODEL_NAME` | `qwen2.5vl:7b` | Vision-language model |
-| `LLM_MODEL_NAME` | `llama3` | Text generation model |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
-| `JIRA_COLLECTION_NAME` | `JiraCollection` | Weaviate collection for Ollama |
-
-**Azure OpenAI Configuration:**
 
 | Constant | Default | Description |
 |----------|---------|-------------|
 | `AZURE_OPENAI_ENDPOINT` | (from env) | Azure OpenAI resource endpoint |
 | `AZURE_OPENAI_API_KEY` | (from env) | Azure OpenAI API key |
-| `AZURE_OPENAI_API_VERSION` | `2024-02-01` | Azure API version |
-| `AZURE_OPENAI_LLM_DEPLOYMENT` | `gpt-4o-mini` | Azure LLM deployment name |
+| `AZURE_OPENAI_API_VERSION` | `2024-08-01-preview` | Azure API version |
+| `AZURE_OPENAI_LLM_DEPLOYMENT` | `gpt-5-nano` | Azure LLM deployment name |
 | `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | `text-embedding-3-small` | Azure embeddings deployment (1536 dims) |
-| `OPENAI_JIRA_COLLECTION_NAME` | `JiraCollectionOpenAI` | Weaviate collection for Azure OpenAI |
-
-**Generic:**
-
-| Constant | Default | Description |
-|----------|---------|-------------|
+| `JIRA_COLLECTION_NAME` | `JiraCollection` | Weaviate collection name |
 | `MAX_EMBEDDINGS_INPUT_CHARS` | `4000` | Max chars for embedding |
 | `LLM_CALL_TIMEOUT_SECONDS` | `60` | LLM call timeout |
 
@@ -447,10 +384,10 @@ def _get_llm(self) -> ChatOllama:
 
 | Constant | Value | Location |
 |----------|-------|----------|
-| `MAX_LOG_FILES_TO_PROCESS` | 20 | jira_ticket_processing.py |
-| `MAX_LINES_PER_LOG` | 50 | jira_ticket_processing.py |
-| `MAX_WORDS_IN_COMMENTS` | 400 | jira_ticket_processing.py |
-| `CONTEXT_LINES_BEFORE_ERROR` | 10 | jira_ticket_processing.py |
-| `CONTEXT_LINES_AFTER_ERROR` | 20 | jira_ticket_processing.py |
-| `WEAVIATE_BATCH_SIZE` | 100 | index_jira_tickets.py |
-| `MAX_PROCESS_TICKET_WORKERS` | 5 | index_jira_tickets.py |
+| `MAX_LOG_FILES_TO_PROCESS` | 20 | openai_jira_ticket_processing.py |
+| `MAX_LINES_PER_LOG` | 50 | openai_jira_ticket_processing.py |
+| `MAX_WORDS_IN_COMMENTS` | 400 | openai_jira_ticket_processing.py |
+| `CONTEXT_LINES_BEFORE_ERROR` | 10 | openai_jira_ticket_processing.py |
+| `CONTEXT_LINES_AFTER_ERROR` | 20 | openai_jira_ticket_processing.py |
+| `WEAVIATE_BATCH_SIZE` | 100 | openai_index_jira_tickets.py |
+| `MAX_PROCESS_TICKET_WORKERS` | 5 | openai_index_jira_tickets.py |

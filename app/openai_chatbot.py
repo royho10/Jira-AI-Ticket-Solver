@@ -4,6 +4,7 @@ import logging
 import os
 import requests
 import sys
+import time
 from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Any
@@ -19,7 +20,6 @@ import weaviate.classes as wvc
 from dotenv import load_dotenv
 from langchain_openai import AzureOpenAIEmbeddings, AzureChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
-from langsmith import Client, traceable
 from pydantic import BaseModel, Field
 
 from config.settings import (
@@ -29,12 +29,14 @@ from config.settings import (
     AZURE_OPENAI_LLM_DEPLOYMENT,
     AZURE_OPENAI_EMBEDDING_DEPLOYMENT,
     AZURE_OPENAI_TEMPERATURE,
-    OPENAI_JIRA_COLLECTION_NAME,
+    JIRA_COLLECTION_NAME,
     MAX_EMBEDDINGS_INPUT_CHARS,
+    RERANK_SCORE_THRESHOLD,
+    MAX_SIMILAR_TICKETS_AFTER_RERANK,
 )
 from utils.jira_client import JiraIssue, JiraClient, extract_jira_keys_from_text, ATLASSIAN_INSTANCE_URL
-from utils.openai_jira_ticket_processing import OpenAIJiraIssueLLMProcessor
-from utils.jira_ticket_processing import LogAnalysisOutput
+from utils.openai_jira_ticket_processing import OpenAIJiraIssueLLMProcessor, LogAnalysisOutput
+from utils.llm_logger import log_llm_call, log_run_summary
 
 
 # Configure logging
@@ -52,10 +54,10 @@ load_dotenv()
 JIRA_BASE_URL = os.environ.get("ATLASSIAN_INSTANCE_URL", "").replace("/rest/api/3", "").rstrip("/")
 
 # Chatbot-specific constants
-MAX_NUM_SIMILAR_TICKETS_FROM_RAG = 5
-NUM_MOST_RELEVANT_TICKETS_TO_RETURN = 5
+MAX_CANDIDATES_FROM_RAG = 20
 MAX_MSG_HISTORY = 10
 NUM_EMBEDDING_RETRIES = 2
+MAX_EMBEDDINGS_DESCRIPTION_INPUT_CHARS = MAX_EMBEDDINGS_INPUT_CHARS / 2  # Use half of the input space for description, rest for summary
 
 
 EMBEDDER = AzureOpenAIEmbeddings(
@@ -97,6 +99,18 @@ class FinalAnalysisOutput(BaseModel):
     similar_tickets: List[SimilarTicketInfo] = Field(description="List of similar tickets with details")
     suggested_solutions: List[str] = Field(description="List of suggested solutions or mitigation steps supported by evidence from similar tickets")
     important_notes: List[str] = Field(description="List of important notes, warnings, or risks")
+
+
+class RerankTicketScore(BaseModel):
+    """Score for a single ticket from LLM reranking."""
+    key: str = Field(description="Jira ticket key")
+    relevance_score: int = Field(description="Relevance score 0-10")
+    reason: str = Field(description="Brief reason for the score")
+
+
+class RerankOutput(BaseModel):
+    """Output from LLM reranking of candidate tickets."""
+    scored_tickets: List[RerankTicketScore]
 
 
 class OpenAIJiraChatBot:
@@ -144,9 +158,6 @@ Be concise, factual, and technical. If something is unknown, say "unknown".
 
         # ---- Connect to Weaviate ----
         self.db_client = weaviate.connect_to_local()
-
-        # ---- Connect to Langsmith ----
-        self.langsmith_client = Client()
 
     # ------------------------
     # Internal helpers
@@ -294,16 +305,20 @@ Be concise, factual, and technical. If something is unknown, say "unknown".
         if status_placeholder:
             status_placeholder.markdown("🔍 **Finding similar tickets...**")
 
-        query_text = (issue_summary + "\n\n" + (jira_issue.description or ""))[:MAX_EMBEDDINGS_INPUT_CHARS]
+        # Description priority embedding — matches indexer construction
+        desc_text = (jira_issue.description or "")[:int(MAX_EMBEDDINGS_DESCRIPTION_INPUT_CHARS)]
+        remaining = MAX_EMBEDDINGS_INPUT_CHARS - len(desc_text) - 2
+        summary_part = issue_summary[:remaining]
+        query_text = desc_text + "\n\n" + summary_part
 
         # Generate embedding using OpenAI
         query_embedding = self.embedder.embed_documents([query_text])[0]
 
         # Query RAG for similar tickets from OpenAI collection
-        jira_collection = self.db_client.collections.get(OPENAI_JIRA_COLLECTION_NAME)
+        jira_collection = self.db_client.collections.get(JIRA_COLLECTION_NAME)
         similar_tickets_from_rag = jira_collection.query.near_vector(
             near_vector=query_embedding,
-            limit=MAX_NUM_SIMILAR_TICKETS_FROM_RAG,
+            limit=MAX_CANDIDATES_FROM_RAG,
             return_metadata=wvc.query.MetadataQuery(distance=True)
         )
 
@@ -318,7 +333,7 @@ Be concise, factual, and technical. If something is unknown, say "unknown".
     def _extract_similar_tickets_from_rag_result(self, rag_result: Any, current_issue_key: str) -> str:
         """
         Process and store similar tickets (exclude the current ticket itself).
-        rerank the rag results and returns the NUM_MOST_RELEVANT_TICKETS_TO_RETURN most relevant tickets
+        rerank the rag results and return the most relevant tickets
         """
         similar_tickets = []
         for obj in rag_result.objects:
@@ -344,8 +359,77 @@ Be concise, factual, and technical. If something is unknown, say "unknown".
         return self._rerank_similar_tickets()
 
     def _rerank_similar_tickets(self) -> str:
-        """Rerank similar tickets using LLM for better relevance."""
-        # TODO: Add reranking logic
+        """Rerank similar tickets using LLM for better relevance scoring and filtering."""
+        candidates = st.session_state.similar_tickets
+        if not candidates:
+            return ""
+
+        current = st.session_state.current_ticket
+        candidate_details = []
+        for t in candidates:
+            candidate_details.append(
+                f"- Key: {t['key']}, Title: {t['title']}, Summary: {t['summary'][:500]}"
+            )
+        candidates_text = "\n".join(candidate_details)
+
+        rerank_prompt = f"""You are a Jira ticket similarity scorer. Given a current ticket and a list of candidate tickets,
+score each candidate on a 0-10 relevance scale based on:
+- Same error patterns or error messages
+- Same component/service affected
+- Same symptoms described
+- Same root cause
+
+Score guide: 0 = completely unrelated, 5 = moderately similar, 10 = nearly identical issue.
+
+Current ticket:
+- Key: {current['key']}
+- Summary: {current['summary'][:1000]}
+- Description: {current['description'][:1000]}
+
+Candidate tickets:
+{candidates_text}
+
+Score each candidate. Return ALL candidates with their scores."""
+
+        llm = AzureChatOpenAI(
+            azure_deployment=AZURE_OPENAI_LLM_DEPLOYMENT,
+            azure_endpoint=AZURE_OPENAI_ENDPOINT,
+            openai_api_version=AZURE_OPENAI_API_VERSION,
+            openai_api_key=AZURE_OPENAI_API_KEY,
+            temperature=AZURE_OPENAI_TEMPERATURE,
+        )
+        structured_llm = llm.with_structured_output(RerankOutput)
+        messages = [
+            SystemMessage(content="You are an expert at comparing Jira tickets for similarity."),
+            HumanMessage(content=rerank_prompt)
+        ]
+
+        try:
+            start = time.time()
+            rerank_result = structured_llm.invoke(messages)
+            duration_ms = int((time.time() - start) * 1000)
+            log_llm_call("reranking", AZURE_OPENAI_LLM_DEPLOYMENT, messages, rerank_result, duration_ms)
+            if isinstance(rerank_result, dict):
+                rerank_result = RerankOutput(**rerank_result)
+        except Exception as e:
+            logger.error(f"Reranking failed, keeping original order: {e}")
+            return ""
+
+        # Build a lookup of scores/reasons by ticket key
+        score_map = {s.key: s for s in rerank_result.scored_tickets}
+
+        # Filter and sort
+        reranked = []
+        for ticket in candidates:
+            scored = score_map.get(ticket['key'])
+            if scored and scored.relevance_score >= RERANK_SCORE_THRESHOLD:
+                ticket['rerank_score'] = scored.relevance_score
+                ticket['rerank_reason'] = scored.reason
+                reranked.append(ticket)
+
+        reranked.sort(key=lambda t: t.get('rerank_score', 0), reverse=True)
+        st.session_state.similar_tickets = reranked[:MAX_SIMILAR_TICKETS_AFTER_RERANK]
+
         return ""
 
     def _generate_analysis(self, logs_analysis: List[LogAnalysisOutput]) -> str:
@@ -364,12 +448,16 @@ Be concise, factual, and technical. If something is unknown, say "unknown".
             SystemMessage(content=final_analysis_system_prompt),
             HumanMessage(content=final_analysis_input_prompt)
         ]
+        start = time.time()
         final_analysis = structured_llm.invoke(messages)
+        duration_ms = int((time.time() - start) * 1000)
+        log_llm_call("final_analysis", AZURE_OPENAI_LLM_DEPLOYMENT, messages, final_analysis, duration_ms)
         if isinstance(final_analysis, dict):
             final_analysis = FinalAnalysisOutput(**final_analysis)
 
         final_analysis_text = self._parse_final_analysis_output(final_analysis, logs_analysis)
 
+        log_run_summary()
         return final_analysis_text
 
     @staticmethod
@@ -377,7 +465,7 @@ Be concise, factual, and technical. If something is unknown, say "unknown".
         final_analysis_system_prompt = """
         You are an expert Jira analyst assisting software engineers.
 
-        Your task is to analyze a Jira ticket together with its top 5 most similar past tickets and produce a
+        Your task is to analyze a Jira ticket together with its most similar past tickets (if any) and produce a
         structured, factual analysis.
 
         Rules:
@@ -411,7 +499,7 @@ Be concise, factual, and technical. If something is unknown, say "unknown".
         """)
         similar_tickets_formatted = "\n".join(similar_tickets_details).strip() or "NONE"
         current_ticket = st.session_state.current_ticket
-        similat_tickets_num = 0 if similar_tickets_formatted == "NONE" else len(st.session_state.similar_tickets)
+        similat_tickets_num = len(st.session_state.similar_tickets)
 
         final_analysis_input_prompt = f"""
         Current Jira ticket information:
@@ -422,14 +510,14 @@ Be concise, factual, and technical. If something is unknown, say "unknown".
         - Priority: {current_ticket['priority']}
         - Labels: {current_ticket['labels']}
 
-        Top 5 most similar Jira tickets (already reranked by relevance):
+        Similar Jira tickets (reranked by relevance, {similat_tickets_num} total):
         {similar_tickets_formatted}
 
         HARD RULES (must follow):
-        - You MUST return `similar_tickets` with EXACTLY {similat_tickets_num} items.
+        - Return `similar_tickets` with exactly the tickets provided above. If none provided, return an empty list.
         - You MUST include EVERY provided similar ticket key exactly once.
         - Do NOT drop items. Do NOT merge items. Do NOT invent additional items.
-        - If the "Top similar Jira tickets" section is "NONE":
+        - If the "Similar Jira tickets" section is "NONE":
           - Return an empty list for similar_tickets: []
           - Do NOT mention any other Jira ticket keys in any section
           - Any similarity_reason/solutions based on similar tickets must be "unknown"
@@ -522,10 +610,15 @@ Be concise, factual, and technical. If something is unknown, say "unknown".
         if not current_ticket_key:
             if potential_keys:
                 if len(potential_keys) == 1:
-                    return IntentClassification.ANALYZE_NEW_TICKET
+                    intent = IntentClassification.ANALYZE_NEW_TICKET
                 else:
-                    return IntentClassification.MORE_THAN_ONE_KEY
-            return IntentClassification.UNRELATED_CHAT
+                    intent = IntentClassification.MORE_THAN_ONE_KEY
+            else:
+                intent = IntentClassification.UNRELATED_CHAT
+            log_llm_call("intent_classification (rule-based)", "N/A",
+                         f"user_msg={user_msg}, current_ticket=None, keys={potential_keys}",
+                         intent.value, duration_ms=0)
+            return intent
 
         # ------------------------
         # Current ticket exists but no key found in user input
@@ -544,13 +637,17 @@ Be concise, factual, and technical. If something is unknown, say "unknown".
         # ------------------------
         if len(potential_keys) == 1:
             if potential_keys[0] == current_ticket_key:
-                return IntentClassification.FOLLOW_UP_ON_CURRENT_TICKET
-            similar_tickets_keys = {t["key"] for t in st.session_state.similar_tickets}
-            if potential_keys[0] in similar_tickets_keys:
-                return IntentClassification.FOLLOW_UP_ON_CURRENT_TICKET
-            return IntentClassification.ANALYZE_NEW_TICKET
+                intent = IntentClassification.FOLLOW_UP_ON_CURRENT_TICKET
+            elif potential_keys[0] in {t["key"] for t in st.session_state.similar_tickets}:
+                intent = IntentClassification.FOLLOW_UP_ON_CURRENT_TICKET
+            else:
+                intent = IntentClassification.ANALYZE_NEW_TICKET
         else:
-            return IntentClassification.MORE_THAN_ONE_KEY
+            intent = IntentClassification.MORE_THAN_ONE_KEY
+        log_llm_call("intent_classification (rule-based)", "N/A",
+                     f"user_msg={user_msg}, current_ticket={current_ticket_key}, keys={potential_keys}",
+                     intent.value, duration_ms=0)
+        return intent
 
     def _classify_intent_with_llm(self, user_msg: str) -> str:
         intent_system_prompt = self._create_intent_classification_system_prompt()
@@ -561,7 +658,11 @@ Be concise, factual, and technical. If something is unknown, say "unknown".
             HumanMessage(content=intent_input_prompt)
         ]
 
-        return structured_llm.invoke(messages).intent.value
+        start = time.time()
+        result = structured_llm.invoke(messages)
+        duration_ms = int((time.time() - start) * 1000)
+        log_llm_call("intent_classification", AZURE_OPENAI_LLM_DEPLOYMENT, messages, result, duration_ms)
+        return result.intent.value
 
     @staticmethod
     def _create_intent_classification_system_prompt() -> str:
@@ -609,14 +710,22 @@ Be concise, factual, and technical. If something is unknown, say "unknown".
                 *self.history[1:],  # Exclude original system prompt
                 HumanMessage(content=follow_up_input_prompt)
             ]
-            response = self.chat.invoke(messages).content
+            start = time.time()
+            result = self.chat.invoke(messages)
+            duration_ms = int((time.time() - start) * 1000)
+            log_llm_call("follow_up_conversation", AZURE_OPENAI_LLM_DEPLOYMENT, messages, result.content, duration_ms)
+            response = result.content
 
         if intent == IntentClassification.UNRELATED_CHAT:
             messages = [
                 *self.history,
                 HumanMessage(content=user_message)
             ]
-            response = self.chat.invoke(messages).content
+            start = time.time()
+            result = self.chat.invoke(messages)
+            duration_ms = int((time.time() - start) * 1000)
+            log_llm_call("unrelated_chat", AZURE_OPENAI_LLM_DEPLOYMENT, messages, result.content, duration_ms)
+            response = result.content
 
         if intent == IntentClassification.MORE_THAN_ONE_KEY:
             issue_keys = extract_jira_keys_from_text(user_message)
