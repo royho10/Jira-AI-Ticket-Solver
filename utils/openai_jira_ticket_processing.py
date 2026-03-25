@@ -52,6 +52,12 @@ class ErrorInLog(BaseModel):
     error_lines: str = Field(
         description="Copy the EXACT line(s) from the log that contain 'ERROR'. Do not paraphrase or summarize."
     )
+    exception_line: Optional[str] = Field(
+        default=None,
+        description="The final exception line from a traceback if present, e.g. "
+                    "'NoSuchOptError: no such option: BEg' or 'KeyError: 123'. "
+                    "Copy it EXACTLY. Leave null if no traceback/exception is found."
+    )
     context: str = Field(
         description="What went wrong in 1-2 sentences. Example: 'Database connection failed due to timeout.'"
     )
@@ -181,10 +187,12 @@ class OpenAIJiraIssueLLMProcessor:
 RULES:
 1. Extract verbatim error messages, stack traces, exception names, and error codes found in the text.
 2. For error_lines: Copy the EXACT error text as written in the description. Do not paraphrase.
-3. For context: Briefly explain what the error means. Flag subjective claims (e.g., "reporter says the DB is down") as "reporter observation" rather than fact.
-4. For source_code_filename: Only include filenames (.py, .java, .js, etc.) explicitly mentioned in the error text.
-5. If no error patterns, stack traces, or exception messages are found, return an EMPTY errors list.
-6. Do NOT treat normal descriptions of symptoms as errors unless they contain actual error messages or stack traces."""
+3. For exception_line: If a traceback/stack trace is present, copy the FINAL exception line exactly
+   (e.g., "NoSuchOptError: no such option: BEg", "KeyError: 'missing_key'"). This is the most important field.
+4. For context: Briefly explain what the error means. Flag subjective claims (e.g., "reporter says the DB is down") as "reporter observation" rather than fact.
+5. For source_code_filename: Only include full filenames (.py, .java, .js, etc.) explicitly mentioned in the error text.
+6. If no error patterns, stack traces, or exception messages are found, return an EMPTY errors list.
+7. Do NOT treat normal descriptions of symptoms as errors unless they contain actual error messages or stack traces."""
 
         user_prompt = f"""Extract any error messages, stack traces, or exceptions from this Jira ticket description.
 If there are no actual error messages or stack traces, return an empty errors list.
@@ -475,6 +483,8 @@ TICKET DESCRIPTION:
                 result_lines.append(f"- Log File: `{log_analysis.log_filename}`")
                 if error.source_code_filename:
                     result_lines.append(f"  File in code: `{error.source_code_filename}`")
+                if error.exception_line:
+                    result_lines.append(f"  Exception: {error.exception_line}")
                 result_lines.append(f"  Error: \"{error.error_lines}\"")
                 result_lines.append(f"  Context: {error.context}")
                 result_lines.append("")  # Add an empty line for better readability
@@ -502,9 +512,11 @@ TICKET DESCRIPTION:
         STRICT RULES:
         1. Find every line containing "ERROR" (uppercase)
         2. For error_lines: Copy the ENTIRE log line verbatim, exactly as written
-        3. For context: Write 1-2 sentences explaining what the error means
-        4. For source_code_filename: Only include .py files mentioned in the error
-        5. Deduplicate errors with minor differences (e.g., timestamps, thread IDs) if they are otherwise identical.
+        3. For exception_line: If a traceback follows the ERROR, copy the FINAL exception line exactly
+           (e.g., "NoSuchOptError: no such option: BEg"). This is the most important field.
+        4. For context: Write 1-2 sentences explaining what the error means
+        5. For source_code_filename: Only include .py files mentioned in the error
+        6. Deduplicate errors with minor differences (e.g., timestamps, thread IDs) if they are otherwise identical.
            - Merge such errors into one entry, and include the most recent timestamp.
            - Ensure the context remains accurate and relevant.
 
@@ -515,6 +527,7 @@ TICKET DESCRIPTION:
 
         EXAMPLE OUTPUT:
         - error_lines: "2024-01-15 10:24:00 ERROR controller.py:142 - Failed to connect to database: timeout"
+        - exception_line: null
         - source_code_filename: "controller.py"
         - context: "Database connection failed due to a timeout error."
 
@@ -531,6 +544,7 @@ TICKET DESCRIPTION:
 
         Remember:
         - error_lines = exact copy of the ERROR line from above
+        - exception_line = if a traceback follows, the FINAL exception line (e.g., "KeyError: 'x'") or null
         - context = brief explanation of what went wrong
         - source_code_filename = any .py file mentioned (or null)
 
@@ -713,6 +727,8 @@ TICKET DESCRIPTION:
                     result_lines.append(f"- Log File: `{log_analysis.log_filename}`")
                     if error.source_code_filename:
                         result_lines.append(f"  File in code: `{error.source_code_filename}`")
+                    if error.exception_line:
+                        result_lines.append(f"  Exception: {error.exception_line}")
                     result_lines.append(f"  Error: \"{error.error_lines}\"")
                     result_lines.append(f"  Context: {error.context}")
                     result_lines.append("")  # Add an empty line for better readability

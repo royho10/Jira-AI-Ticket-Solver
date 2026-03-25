@@ -243,7 +243,7 @@ Be concise, factual, and technical. If something is unknown, say "unknown".
             st.sidebar.markdown("---")
             st.sidebar.markdown("### 🎫 Current Ticket")
             ticket = st.session_state.current_ticket
-            st.sidebar.markdown(f"**{ticket['key']}**")
+            st.sidebar.markdown(f"**{ticket['key']}**: {ticket.get('title', '')}")
             st.sidebar.markdown(f"Status: `{ticket['status']}`")
             if JIRA_BASE_URL:
                 st.sidebar.markdown(f"[View in Jira →]({JIRA_BASE_URL}/browse/{ticket['key']})")
@@ -293,6 +293,7 @@ Be concise, factual, and technical. If something is unknown, say "unknown".
         # Store current ticket
         st.session_state.current_ticket = {
             "key": jira_issue.key,
+            "title": jira_issue.summary,
             "summary": issue_summary,
             "description": jira_issue.description or "",
             "status": jira_issue.status,
@@ -540,10 +541,13 @@ Score each candidate. Return ALL candidates with their scores."""
         """Format the final analysis output into a readable string."""
 
         def sanitize_text(text: str) -> str:
-            """Remove unwanted code fences and clean up text."""
+            """Remove unwanted code fences and escape markdown/LaTeX special chars."""
             if not text:
                 return ""
             text = text.replace("```python", "").replace("```", "")
+            # Escape characters that Streamlit markdown interprets unexpectedly
+            for ch in ("$", "<", ">", "{", "}", "~"):
+                text = text.replace(ch, f"\\{ch}")
             return text.strip()
 
         ticket_summary = sanitize_text(final_analysis.ticket_summary)
@@ -553,14 +557,34 @@ Score each candidate. Return ALL candidates with their scores."""
         error_lines = []
         for log_analysis in logs_analysis:
             for error in log_analysis.errors:
-                error_text = sanitize_text(error.error_lines[:500])
-                error_block = f"    - Log File: {log_analysis.log_filename}"
+                exception_text = sanitize_text(error.exception_line) if error.exception_line else None
+
+                # Determine whether to show the error_lines code block
+                raw_error = error.error_lines.strip() if error.error_lines else ""
+                show_code_block = bool(raw_error)
+                if raw_error.lower() == "undefined":
+                    show_code_block = False
+                elif exception_text and (
+                    raw_error.startswith("Traceback")
+                    or raw_error.startswith('File "')
+                ):
+                    # Redundant truncated traceback when we already have the exception
+                    show_code_block = False
+
+                # Build metadata as indented sub-items under "Errors found in logs:"
+                error_block = f"    - **Log File:** {log_analysis.log_filename}"
                 if error.source_code_filename:
-                    error_block += f"  \n      File in code: {error.source_code_filename}"
-                error_block += f"  \n      Error: `{error_text}`"
-                error_block += f"  \n      Context: {sanitize_text(error.context)}"
+                    error_block += f"\n      **File in code:** `{sanitize_text(error.source_code_filename)}`"
+                error_block += f"\n      **Context:** {error.context}"
+                if exception_text:
+                    error_block += f"\n      **Exception:** `{exception_text}`"
+                if show_code_block:
+                    error_text = sanitize_text(raw_error[:500])
+                    # Code block at column 0 to prevent Streamlit bleeding
+                    error_block += f"\n\n```\n{error_text}\n```"
+
                 error_lines.append(error_block)
-        errors_in_logs_formatted = "\n\n".join(error_lines) if error_lines else "    - No errors found in logs."
+        errors_in_logs_formatted = "\n".join(error_lines) if error_lines else "    - No errors found in logs."
 
         similar_ticket_lines = []
         for similar_ticket in final_analysis.similar_tickets:
@@ -574,11 +598,32 @@ Score each candidate. Return ALL candidates with their scores."""
         similar_tickets_formatted = "\n".join(
             similar_ticket_lines) if similar_ticket_lines else "No similar tickets found."
 
-        suggested_solutions_formatted = "\n".join(f"* {sanitize_text(s)}" for s in final_analysis.suggested_solutions)
+        def strip_list_marker(text: str) -> str:
+            stripped = text.lstrip()
+            for marker in ("- ", "* ", "• ", "◦ "):
+                if stripped.startswith(marker):
+                    return stripped[len(marker):]
+            return stripped
+
+        filtered_solutions = [
+            strip_list_marker(s) for s in final_analysis.suggested_solutions
+            if s.strip().lower() not in ("unknown", "")
+        ]
+        suggested_solutions_formatted = "\n".join(
+            f"* {sanitize_text(s)}" for s in filtered_solutions
+        ) if filtered_solutions else "No suggested solutions."
         important_notes_formatted = "\n".join(f"* {sanitize_text(n)}" for n in final_analysis.important_notes)
+
+        # Ticket presentation header
+        current_ticket = st.session_state.current_ticket
+        ticket_key = current_ticket['key'] if current_ticket else "Unknown"
+        ticket_title = current_ticket.get('title', '') if current_ticket else ""
+        jira_url = f"{JIRA_BASE_URL}/browse/{ticket_key}"
 
         # NO leading whitespace - start each line at column 0
         analysis_text = (
+            f"***[{ticket_key}]({jira_url}) — {ticket_title}**\n\n"
+            f"---\n\n"
             f"## 📋 Ticket Summary\n"
             f"{ticket_summary}\n\n"
             f"## 🔍 Key Issues & Root Causes\n"
