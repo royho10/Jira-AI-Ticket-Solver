@@ -28,6 +28,7 @@ from config.settings import (
 )
 from utils.jira_client import JiraClient, JiraIssue
 from utils.openai_jira_ticket_processing import OpenAIJiraIssueLLMProcessor
+from utils.weaviate_client import connect_to_weaviate
 
 # Indexer-specific constants
 WEAVIATE_BATCH_SIZE = 100
@@ -42,7 +43,7 @@ class OpenAIJiraIndexer:
     """
 
     def __init__(self):
-        self.db_client = weaviate.connect_to_local()
+        self.db_client = connect_to_weaviate()
         self.jira_client = JiraClient()
         self.embedding_model = AzureOpenAIEmbeddings(
             azure_deployment=AZURE_OPENAI_EMBEDDING_DEPLOYMENT,

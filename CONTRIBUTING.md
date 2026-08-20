@@ -44,20 +44,34 @@ docker run -d \
 |--------|---------|
 | `config/settings.py` | Centralized configuration constants |
 | `utils/jira_client.py` | Jira API client and Pydantic data models |
+| `utils/weaviate_client.py` | Local vs remote Weaviate connection |
 | `utils/openai_jira_ticket_processing.py` | LLM/VLM processing logic (Azure OpenAI) |
 | `utils/file_utils.py` | Archive extraction utilities |
-| `utils/llm_logger.py` | LLM call logging |
+| `utils/llm_logger.py` | LLM call logging (disabled on the MCP server) |
+| `core/ticket_analyzer.py` | The Analysis pipeline, UI-agnostic and stateless |
+| `core/pii_sanitizer.py` | Mandatory LLM redaction pass |
+| `server/mcp_server.py` | MCP Streamable HTTP app (FastAPI) |
+| `server/auth.py` | Jira access check and Origin validation |
+| `server/response_formatter.py` | Markdown + `<ticket_analysis>` rendering |
+| `server/asgi.py` | uvicorn entry point |
 | `indexer/openai_index_jira_tickets.py` | Batch indexing pipeline |
 | `app/openai_chatbot.py` | Streamlit UI |
+
+Both interfaces share one analysis path: the Streamlit app and the MCP server each call
+`core/ticket_analyzer.py` and neither reimplements any of it. Anything that belongs to
+the analysis belongs in `core/`, not in a UI or transport module.
 
 ### Directory Structure
 
 ```
 Jira-AI-Ticket-Solver/
-├── app/                    # Web interface (openai_chatbot.py)
-├── config/                 # Configuration (Azure OpenAI settings)
+├── app/                    # Streamlit interface (openai_chatbot.py)
+├── core/                   # Analysis pipeline + PII sanitizer (UI-agnostic)
+├── server/                 # Remote MCP Server (FastAPI, auth, formatting)
+├── config/                 # Configuration (Azure OpenAI, Weaviate, MCP settings)
 ├── indexer/                # Batch processing (indexer)
-├── utils/                  # Shared utilities (processor, Jira client)
+├── utils/                  # Shared utilities (processor, Jira and Weaviate clients)
+├── tests/                  # deterministic / llm_eval / integration tiers
 ├── requirements.txt        # Dependencies
 └── .env.example           # Environment template
 ```
@@ -79,6 +93,14 @@ AZURE_OPENAI_EMBEDDING_DEPLOYMENT = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLO
 
 # Weaviate Configuration
 JIRA_COLLECTION_NAME = "JiraCollection"
+WEAVIATE_URL = os.environ.get("WEAVIATE_URL")  # unset -> local Docker instance
+WEAVIATE_API_KEY = os.environ.get("WEAVIATE_API_KEY")
+WEAVIATE_GRPC_PORT = int(os.environ.get("WEAVIATE_GRPC_PORT", "50051"))
+
+# Remote MCP Server
+MCP_ALLOWED_ORIGINS = [...]  # parsed from a comma-separated env var
+MCP_SSE_KEEPALIVE_SECONDS = float(os.environ.get("MCP_SSE_KEEPALIVE_SECONDS", "15"))
+MCP_SSE_STREAM_SECONDS = float(os.environ.get("MCP_SSE_STREAM_SECONDS", "300"))
 
 # Generic Limits
 MAX_EMBEDDINGS_INPUT_CHARS = 4000
@@ -105,6 +127,25 @@ python -m indexer.openai_index_jira_tickets
 ```bash
 streamlit run app/openai_chatbot.py
 ```
+
+### Run the MCP Server
+
+```bash
+uvicorn server.asgi:app --host 127.0.0.1 --port 8000 --reload
+```
+
+```bash
+# Liveness
+curl http://localhost:8000/health
+
+# List the tools the server exposes
+curl -s http://localhost:8000/mcp \
+  -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+A real tool call needs `X-Jira-Email` and `X-Jira-Token` headers. Terminate TLS in front
+of the server in any shared deployment — user Jira tokens travel in those headers.
 
 ### Verify Services
 

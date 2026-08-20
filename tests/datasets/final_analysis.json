@@ -1,0 +1,75 @@
+[
+  {
+    "test_id": "final_analysis_gc133039",
+    "description": "GC-133039: Full analysis with real similar ticket GC-136871",
+    "input": {
+      "current_ticket": {
+        "key": "GC-133039",
+        "title": "[DCU] F5 Orchestration not working complaining about NoSuchOptError: no such option: BEg",
+        "summary": "F5 Orchestration fails to initialize after upgrade to v17.1.3, reporting NoSuchOptError: no such option: BEg during oslo_config parsing in cfg.py. BEg is not a valid option in F5 config. Connectivity is OK but no data is updated; UI shows 'No Data'. Password escaping workaround suggested; resolution expected in newer versions.",
+        "description": "F5 Orchestration is not working and showing no data after upgrade of F5's from v17.1.2.2 to v17.1.3. NoSuchOptError: no such option: BEg in oslo_config. Customer confirms BEg is not a valid option. Password likely contains $ causing escaping issue.",
+        "status": "Rejected",
+        "priority": "Medium",
+        "labels": []
+      },
+      "similar_tickets": [
+        {
+          "key": "GC-136871",
+          "title": "Mitigation workers has the ERROR \"Failed to push new agent configuration. Request data: 'b'''\"",
+          "summary": "Mitigation workers repeatedly fail to push new agent configuration when processing agent configuration updates delivered via AGENT_CONFIG_UPDATE_MESSAGE_TYPE at ~10-minute intervals. The failure is tied to an invalid request payload shown as 'b''' and occurs during parsing with fastjson.loads; updates are delivered as an empty dict ({}).",
+          "status": "Closed",
+          "resolution": "Unresolved",
+          "labels": ["hive_rau"],
+          "issue_type": "Bug"
+        }
+      ],
+      "logs_analysis": []
+    },
+    "expected": {
+      "has_ticket_summary": true,
+      "min_key_issues": 1,
+      "min_root_causes": 1,
+      "min_similar_tickets": 1,
+      "similar_ticket_keys": ["GC-136871"],
+      "must_not_invent_tickets": true,
+      "summary_must_contain": ["NoSuchOptError", "BEg"]
+    },
+    "rubric": {
+      "summary_accuracy": "Should mention F5 Orchestration failure with NoSuchOptError during config parsing after upgrade",
+      "root_cause_mentions_password": "Should mention password containing $ as a root cause (from the ticket data)",
+      "similar_ticket_included": "Must include GC-136871 in similar_tickets list exactly once",
+      "no_hallucinated_tickets": "Should not invent ticket keys beyond GC-133039 and GC-136871",
+      "solutions_are_grounded": "Suggested solutions should mention password change/escaping and version upgrade, as stated in the ticket"
+    }
+  },
+  {
+    "test_id": "final_analysis_gc85413_no_similar",
+    "description": "GC-85413: Analysis with no similar tickets found",
+    "input": {
+      "current_ticket": {
+        "key": "GC-85413",
+        "title": "[RC v50.4.0] | Colossus | exception in management service rest-server | KeyError: 'os_display_name'",
+        "summary": "Flask exception in rest-server with KeyError: 'os_display_name' in assets.py during RC verification on Colossus when selecting windows10 workload option in installation instructions page.",
+        "description": "version: v50.4.0-240418. During manual RC verification on Colossus, got Flask exception in rest-server when selected windows10 workload option in installation instructions page. KeyError: 'os_display_name' in assets.py line 1754.",
+        "status": "Rejected",
+        "priority": "High",
+        "labels": ["colossus", "rc_v50.4.0"]
+      },
+      "similar_tickets": [],
+      "logs_analysis": []
+    },
+    "expected": {
+      "has_ticket_summary": true,
+      "min_key_issues": 1,
+      "min_root_causes": 0,
+      "similar_tickets_empty": true,
+      "must_not_invent_tickets": true,
+      "summary_must_contain": ["KeyError", "os_display_name"]
+    },
+    "rubric": {
+      "handles_no_similar_tickets": "Should return empty similar_tickets list without inventing any",
+      "no_hallucinated_keys": "Must not mention any ticket keys other than GC-85413",
+      "summary_accuracy": "Should mention the KeyError in rest-server assets.py during RC verification"
+    }
+  }
+]

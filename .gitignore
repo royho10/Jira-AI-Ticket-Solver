@@ -83,3 +83,8 @@ coverage.xml
 .mypy_cache/
 .dmypy.json
 dmypy.json
+
+# Claude Code local state
+.claude/settings.local.json
+.claude/worktrees/
+.scratch/

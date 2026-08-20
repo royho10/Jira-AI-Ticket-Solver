@@ -1,0 +1,95 @@
+[
+  {
+    "test_id": "error_extraction_gc133039",
+    "description": "GC-133039: F5 Orchestration NoSuchOptError with Python traceback after F5 upgrade",
+    "input": {
+      "description": "Customer Setup: \nEnvironment URL: https://self-service.saas.guardicore.com/app/environment?env_id=096d9630-22fa-4c85-a980-f01fbb499f34\nCentra Version: v51.8.1-250402.eaf24bc.720\n-----\nIssue and Symptoms: F5 Orchestration is not working and showing no data:\nIf you check connectivity it shows successful messages however no data is updated.\nFrom logs we can see the following exception after upgrade of F5's from v17.1.2.2 to v17.1.3. \n\nCustomer confirms there is not such an option like BEg in F5 configuration. \n\n```\nTraceback (most recent call last):\n\nFile \"/var/lib/guardicore/common/application.py\", line 252, in _app_main\n\nFile \"/var/lib/guardicore/aggregator/services/orchestration/run_orchestration.py\", line 68, in initialize\n\nFile \"/var/lib/guardicore/aggregator/component.py\", line 578, in initialize\n\nFile \"/var/lib/guardicore/common/application.py\", line 201, in initialize\n\nFile \"/var/lib/guardicore/aggregator/services/orchestration/run_orchestration.py\", line 89, in _load_config\n\nFile \"/var/lib/guardicore/aggregator/component.py\", line 223, in _load_config\n\nFile \"/var/lib/guardicore/common/application.py\", line 355, in _load_config\n\nFile \"/var/lib/guardicore/common/py/utils/config/oslo_config/cfg.py\", line 1955, in __call__\n\nFile \"/var/lib/guardicore/common/py/utils/config/oslo_config/cfg.py\", line 2545, in _parse_cli_opts\n\nFile \"/var/lib/guardicore/common/py/utils/config/oslo_config/cfg.py\", line 2564, in _parse_config_files\n\nFile \"/var/lib/guardicore/common/py/utils/config/oslo_config/cfg.py\", line 2577, in _validate_cli_options\n\nFile \"/var/lib/guardicore/common/py/utils/config/oslo_config/cfg.py\", line 2439, in _substitute\n\nFile \"/usr/local/lib/python3.12/string.py\", line 142, in safe_substitute\n\nreturn self.pattern.sub(convert, self.template)\n\n^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n\nFile \"/usr/local/lib/python3.12/string.py\", line 133, in convert\n\nreturn str(mapping[named])\n\n~~~~~~~^^^^^^^\n\nFile \"/var/lib/guardicore/common/py/utils/config/oslo_config/cfg.py\", line 2744, in __getitem__\n\nFile \"/var/lib/guardicore/common/py/utils/config/oslo_config/cfg.py\", line 2357, in _get\n\nFile \"/var/lib/guardicore/common/py/utils/config/oslo_config/cfg.py\", line 2375, in _do_get\n\nFile \"/var/lib/guardicore/common/py/utils/config/oslo_config/cfg.py\", line 2509, in _get_opt_info\n\ncommon.py.utils.config.oslo_config.cfg.NoSuchOptError: no such option: BEg\n\nOpenSSL already configured: /etc/guardicore-ssl/guardicore_openssl_marker exists\n\nRunner pid is 2953393\n\nRunning inside virtualenv\n```\n\n----\nIs the issue reproducible? No. \nCan the issue be reproduce on our end? No\nSteps to reproduce: n/a\n\n----\nBusiness Impact: Orchestration is not working. \n\n----\nNeed from R&D:\nShort and long term mitigation"
+    },
+    "expected": {
+      "should_find_errors": true,
+      "must_contain_keywords": ["NoSuchOptError", "BEg"],
+      "must_not_contain": [],
+      "min_errors": 1,
+      "log_filename": "ticket_description"
+    },
+    "rubric": {
+      "identifies_exception_type": "Must identify NoSuchOptError as the exception, specifically 'no such option: BEg'",
+      "identifies_source_file": "Should mention cfg.py or oslo_config/cfg.py as the source file",
+      "context_is_accurate": "Context should mention configuration loading/parsing failure or invalid config option, not unrelated issues",
+      "does_not_hallucinate": "Should not invent error messages or files not present in the traceback"
+    }
+  },
+  {
+    "test_id": "error_extraction_gc85413",
+    "description": "GC-85413: Flask KeyError os_display_name in rest-server during RC verification",
+    "input": {
+      "description": "env: \nversion: v50.4.0-240418.a065781.502\nduring manual RC verification on Colossus, got the following exception in \"rest-server\" when selected windows10 workload option in \"installation instructions\" page:\n```\nFlask exception received from <Flask 'management.global_infra.rest_server.restapi'>:\nTraceback (most recent call last):\n  File \"/usr/local/lib/python3.8/dist-packages/flask/app.py\", line 1484, in full_dispatch_request\n    rv = self.dispatch_request()\n  File \"/usr/local/lib/python3.8/dist-packages/flask/app.py\", line 1469, in dispatch_request\n    return self.ensure_sync(self.view_functions[rule.endpoint])(**view_args)\n  File \"/var/lib/guardicore/management/global_infra/rest_server/authentication.py\", line 102, in decorator\n  File \"/var/lib/guardicore/management/global_infra/rest_server/authentication.py\", line 127, in decorator\n  File \"/var/lib/guardicore/management/global_infra/rest_server/authentication.py\", line 146, in decorator\n  File \"/var/lib/guardicore/management/global_infra/rest_server/authentication.py\", line 82, in decorator\n  File \"/usr/local/lib/python3.8/dist-packages/flask_restful/__init__.py\", line 489, in wrapper\n    resp = resource(*args, **kwargs)\n  File \"/usr/local/lib/python3.8/dist-packages/flask/views.py\", line 109, in view\n    return current_app.ensure_sync(self.dispatch_request)(**kwargs)\n  File \"/usr/local/lib/python3.8/dist-packages/flask_restful/__init__.py\", line 604, in dispatch_request\n    resp = meth(*args, **kwargs)\n  File \"/var/lib/guardicore/management/pipelines/agents_control/global_infra/rest_server/resources/agents.py\", line 673, in get\n  File \"/var/lib/guardicore/management/global_infra/rest_server/rest/utils/filters/query_filters_manager.py\", line 77, in build_query\n  File \"/var/lib/guardicore/management/pipelines/agents_control/global_infra/rest_server/filters/agent_type_fiter.py\", line 23, in get_query\n  File \"/var/lib/guardicore/management/apis/inventory/assets.py\", line 1735, in get_assets_with_endpoint_or_workload\n  File \"/var/lib/guardicore/management/apis/inventory/assets.py\", line 1754, in _is_endpoint_os\nKeyError: 'os_display_name' \n```"
+    },
+    "expected": {
+      "should_find_errors": true,
+      "must_contain_keywords": ["KeyError", "os_display_name"],
+      "must_not_contain": [],
+      "min_errors": 1,
+      "log_filename": "ticket_description"
+    },
+    "rubric": {
+      "identifies_exception_type": "Must identify KeyError: 'os_display_name' as the exception",
+      "identifies_source_file": "Should mention assets.py as the source file where the error occurred",
+      "context_is_accurate": "Context should mention missing dictionary key os_display_name during asset lookup or endpoint OS check",
+      "does_not_hallucinate": "Should not invent error messages or claim errors that are not in the traceback"
+    }
+  },
+  {
+    "test_id": "error_extraction_gc136651_description_with_log_error",
+    "description": "GC-136651: F5 orchestration with inline ERROR log in description about SNATPool",
+    "input": {
+      "description": "Customer env: amdocs-prod-2\nRelevant collector (on-prem, gcsh available): ILRNAGCAGG05 F5 orchestration with the issue: aggr-orchestration-f5-165d23cd-1607-4712-94e8-a766bf2531d8\nBackground:\nCustomer upgraded their F5 instance to 17.1.1.3 and changed it's ip. This broke some labeling scripts (provided by Akamai professional services) which are running in the background. As a result, the customer is experiencing over-blocking and had to WA the problem with a wide allow policy, which is over allowing. The problem:\nDuring the investigation we found that Guardicore stopped receiving assets metadata for destination pool addresses. This data is crucial for the PS scripts.\nError we see in the orchestration log indicate data inconsistency, but its not clear if this relates to the problem:\n```\n2026-01-05 05:57:42,482 [1187305:orchestration-spawn:ERROR] model.fetch_all.172: LocalLB.LocalLB.SNATPool.get_member_v2 failed: \"[/Common/DNS-old-Vlan761, /Common/ISE-SNAT, /Common/Octane-NAT, /Common/dns-snat-pool, /Common/isrwslproxy-snat, /Common/ms365proxy-snat, /Common/snat-pool-apache]\" is not valid for Common.StringSequence; expecting: _arrayType, _offset, _id, _href, _arrayType\n2026-01-05 05:58:01,526 [1187305:GreenThread-3:INFO] rabbit._process_message.533: Component id: AGR-6F082042-E609-C5D8-E985-20AD0271238E received message type nop with no callback registered\n2026-01-05 05:58:02,784 [1187305:orchestration-spawn:INFO] orchestration_service.update.90: query known ips\n2026-01-05 05:58:02,789 [1187305:orchestration-spawn:INFO] orchestration_service.update.117: 976 ip records updates sent\n```\nAdditional comments: we think that this might be related to the new F5 version 17.1.1.3, however so far we have not found an asset that will prove this."
+    },
+    "expected": {
+      "should_find_errors": true,
+      "must_contain_keywords": ["ERROR", "SNATPool"],
+      "must_not_contain": [],
+      "min_errors": 1,
+      "log_filename": "ticket_description"
+    },
+    "rubric": {
+      "identifies_error_line": "Must capture the ERROR line about LocalLB.LocalLB.SNATPool.get_member_v2 failed",
+      "context_is_accurate": "Context should mention SNAT pool member retrieval failure or data type mismatch (StringSequence)",
+      "does_not_hallucinate": "Should not invent errors beyond what's in the description"
+    }
+  },
+  {
+    "test_id": "error_extraction_no_errors_feature_request",
+    "description": "Description with no errors - just symptom description without stack traces",
+    "input": {
+      "description": "Customer reports that the dashboard is loading slowly after the upgrade to v52.3. The page takes about 15 seconds to render on Chrome. No errors in the browser console. The issue affects only the main dashboard page, other pages load normally. Customer is using Chrome 120 on Windows 11. This started happening after the upgrade from v52.2 to v52.3. No workaround found yet."
+    },
+    "expected": {
+      "should_find_errors": false,
+      "must_contain_keywords": [],
+      "must_not_contain": [],
+      "min_errors": 0,
+      "log_filename": "ticket_description"
+    },
+    "rubric": {
+      "no_false_positives": "Should return None or empty errors list - this describes symptoms but contains no actual error messages, stack traces, or exceptions"
+    }
+  },
+  {
+    "test_id": "error_extraction_short_description",
+    "description": "Short description that should be skipped (under 20 chars)",
+    "input": {
+      "description": "Fix the bug"
+    },
+    "expected": {
+      "should_find_errors": false,
+      "must_contain_keywords": [],
+      "must_not_contain": [],
+      "min_errors": 0,
+      "log_filename": "ticket_description"
+    },
+    "rubric": {
+      "skips_short_description": "Should return None since description is under 20 chars"
+    }
+  }
+]

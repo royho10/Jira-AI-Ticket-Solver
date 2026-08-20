@@ -1,0 +1,40 @@
+[
+  {
+    "test_id": "integration_gc133039_full_pipeline",
+    "description": "GC-133039: Full pipeline with real F5 Orchestration ticket - description with traceback, comments, no file attachments",
+    "input": {
+      "jira_issue": {
+        "key": "GC-133039",
+        "summary": "[DCU] F5 Orchestration not working complaining about NoSuchOptError: no such option: BEg",
+        "description": "Customer Setup: \nEnvironment URL: https://self-service.saas.guardicore.com/app/environment?env_id=096d9630-22fa-4c85-a980-f01fbb499f34\nCentra Version: v51.8.1-250402.eaf24bc.720\n-----\nIssue and Symptoms: F5 Orchestration is not working and showing no data:\nIf you check connectivity it shows successful messages however no data is updated.\nFrom logs we can see the following exception after upgrade of F5's from v17.1.2.2 to v17.1.3.\n\nCustomer confirms there is not such an option like BEg in F5 configuration.\n\n```\nTraceback (most recent call last):\n\nFile \"/var/lib/guardicore/common/application.py\", line 252, in _app_main\n\nFile \"/var/lib/guardicore/aggregator/services/orchestration/run_orchestration.py\", line 68, in initialize\n\nFile \"/var/lib/guardicore/aggregator/component.py\", line 578, in initialize\n\nFile \"/var/lib/guardicore/common/application.py\", line 201, in initialize\n\nFile \"/var/lib/guardicore/aggregator/services/orchestration/run_orchestration.py\", line 89, in _load_config\n\nFile \"/var/lib/guardicore/aggregator/component.py\", line 223, in _load_config\n\nFile \"/var/lib/guardicore/common/application.py\", line 355, in _load_config\n\nFile \"/var/lib/guardicore/common/py/utils/config/oslo_config/cfg.py\", line 1955, in __call__\n\nFile \"/var/lib/guardicore/common/py/utils/config/oslo_config/cfg.py\", line 2509, in _get_opt_info\n\ncommon.py.utils.config.oslo_config.cfg.NoSuchOptError: no such option: BEg\n```\n\n----\nBusiness Impact: Orchestration is not working.\n----\nNeed from R&D: Short and long term mitigation",
+        "labels": [],
+        "issue_type": "Bug",
+        "priority": "Medium",
+        "components": ["Orchestration Management [Management]"],
+        "status": "Rejected",
+        "created": "2025-12-01T20:35:19.662+0200",
+        "comments": [
+          {
+            "author_display_name": "Roy Honigman",
+            "body": "It's a duplicate. The issue is that the password likely contains a $, and there is a problem with escaping it. This was resolved in later versions. For now, the solution is to change the customer's password to one that does not include the $ character, or try escaping it by using \"\\$\" instead of \"$\". After upgrading to a newer version, the issue will no longer occur.",
+            "created": "2025-12-02T10:00:00.000+0200"
+          }
+        ],
+        "attachments": [],
+        "related_issues": []
+      }
+    },
+    "expected": {
+      "summary_must_contain": ["NoSuchOptError", "BEg"],
+      "must_find_errors_in_description": true,
+      "errors_must_mention": ["NoSuchOptError"],
+      "final_output_is_valid_string": true,
+      "log_summaries_is_list": true
+    },
+    "rubric": {
+      "end_to_end_coherent": "The final output should be a coherent summary mentioning F5 orchestration failure, NoSuchOptError with BEg option, and the config parsing issue",
+      "error_extraction_works": "Should extract the NoSuchOptError from the description traceback",
+      "comments_included": "Should reference the password escaping workaround from the comment"
+    }
+  }
+]

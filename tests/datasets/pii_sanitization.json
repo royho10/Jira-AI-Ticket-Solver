@@ -1,0 +1,186 @@
+[
+  {
+    "name": "customer identifiers spread across every field",
+    "input": {
+      "ticket_key": "GC-4210",
+      "ticket_title": "Agent on db-prod-01.acmecorp.internal stops reporting",
+      "description": "Reported by Sarah Jenkins (sarah.jenkins@acmecorp.com). The agent on db-prod-01.acmecorp.internal (10.20.30.40) stopped reporting to the management server at 10.20.30.9. Tenant id 8f2c1d44-91ab-4e77-9d0f-2b6a5c3e7f10.",
+      "processed_summary": "The AcmeCorp collector agent lost connectivity. Log shows java.net.SocketTimeoutException connecting to 10.20.30.9:8443.",
+      "ticket_summary": "Agent at AcmeCorp (tenant 8f2c1d44-91ab-4e77-9d0f-2b6a5c3e7f10) stopped reporting after a network change on db-prod-01.acmecorp.internal.",
+      "key_issues": [
+        "Agent on 10.20.30.40 cannot reach the management server on 10.20.30.9",
+        "java.net.SocketTimeoutException raised in AgentReporter.java after 30s"
+      ],
+      "root_causes": [
+        "Firewall rule change at AcmeCorp blocked outbound traffic on port 8443"
+      ],
+      "suggested_solutions": [
+        "Ask Sarah Jenkins to confirm the firewall rule for db-prod-01.acmecorp.internal"
+      ],
+      "important_notes": [
+        "Escalated by mike.obrien@acmecorp.com on the customer side"
+      ],
+      "error_log_highlights": [
+        {
+          "log_filename": "agent.log",
+          "context": "Agent on db-prod-01.acmecorp.internal failed to report",
+          "error_lines": "ERROR AgentReporter - failed to POST to https://10.20.30.9:8443/report",
+          "exception_line": "java.net.SocketTimeoutException: connect timed out",
+          "source_code_filename": "AgentReporter.java"
+        }
+      ],
+      "similar_tickets": [
+        {
+          "key": "GC-3877",
+          "title": "Agent on web-prod-02.globex.io stops reporting",
+          "summary": "Globex agent lost connectivity after a firewall change. Contact was Priya Raman.",
+          "status": "Done",
+          "similarity_reason": "Same java.net.SocketTimeoutException in AgentReporter.java at Globex"
+        }
+      ]
+    },
+    "expected": {
+      "must_not_contain": [
+        "sarah.jenkins@acmecorp.com",
+        "mike.obrien@acmecorp.com",
+        "Sarah Jenkins",
+        "Priya Raman",
+        "10.20.30.40",
+        "10.20.30.9",
+        "db-prod-01.acmecorp.internal",
+        "web-prod-02.globex.io",
+        "8f2c1d44-91ab-4e77-9d0f-2b6a5c3e7f10"
+      ],
+      "must_contain": [
+        "GC-4210",
+        "GC-3877",
+        "java.net.SocketTimeoutException",
+        "AgentReporter.java",
+        "agent.log",
+        "8443"
+      ]
+    }
+  },
+  {
+    "name": "purely technical analysis with no customer data",
+    "input": {
+      "ticket_key": "GC-511",
+      "ticket_title": "NullPointerException in PolicyCompiler on empty label set",
+      "description": "Compiling a policy with an empty label set throws a NullPointerException at PolicyCompiler.java:212. Reproducible on localhost with 127.0.0.1 as the target.",
+      "processed_summary": "PolicyCompiler.compile() dereferences a null label collection when the rule has no labels.",
+      "ticket_summary": "An empty label set causes a NullPointerException in PolicyCompiler.compile().",
+      "key_issues": [
+        "NullPointerException at PolicyCompiler.java:212",
+        "HTTP 500 returned from POST /api/v1/policies"
+      ],
+      "root_causes": [
+        "getLabels() returns null instead of an empty list for label-less rules"
+      ],
+      "suggested_solutions": [
+        "Return Collections.emptyList() from getLabels() and add a regression test"
+      ],
+      "important_notes": [
+        "Affects version 4.2.1 and later"
+      ],
+      "error_log_highlights": [],
+      "similar_tickets": []
+    },
+    "expected": {
+      "must_not_contain": [],
+      "must_contain": [
+        "GC-511",
+        "NullPointerException",
+        "PolicyCompiler.java:212",
+        "/api/v1/policies",
+        "4.2.1",
+        "127.0.0.1"
+      ]
+    }
+  },
+  {
+    "name": "customer name inside otherwise technical error text",
+    "input": {
+      "ticket_key": "GC-9002",
+      "ticket_title": "Deployment to initech-eu-west fails with 403",
+      "description": "Deploy to tenant initech-eu-west (account 774310) returns HTTP 403 from https://api.initech.example.com/v2/deploy. Raised by Bill Lumbergh.",
+      "processed_summary": "The deploy job fails authorization against the Initech tenant endpoint.",
+      "ticket_summary": "Deployment to the Initech EU tenant fails with HTTP 403.",
+      "key_issues": [
+        "HTTP 403 Forbidden from /v2/deploy for account 774310"
+      ],
+      "root_causes": [
+        "The service principal lost the deployer role during the initech-eu-west migration"
+      ],
+      "suggested_solutions": [
+        "Re-grant the deployer role to the service principal"
+      ],
+      "important_notes": [],
+      "error_log_highlights": [
+        {
+          "log_filename": "deploy.log",
+          "context": "Deploy step 3 failed for tenant initech-eu-west",
+          "error_lines": "ERROR DeployClient - 403 Forbidden from https://api.initech.example.com/v2/deploy",
+          "exception_line": "com.guardicore.deploy.AuthorizationException: role 'deployer' required",
+          "source_code_filename": "DeployClient.java"
+        }
+      ],
+      "similar_tickets": []
+    },
+    "expected": {
+      "must_not_contain": [
+        "Bill Lumbergh",
+        "api.initech.example.com",
+        "initech-eu-west",
+        "774310"
+      ],
+      "must_contain": [
+        "GC-9002",
+        "403",
+        "DeployClient.java",
+        "AuthorizationException",
+        "deploy.log"
+      ]
+    }
+  },
+  {
+    "name": "customer identifiers inside attachment filenames",
+    "input": {
+      "ticket_key": "GC-7731",
+      "ticket_title": "Collector stops shipping events after upgrade",
+      "description": "Customer uploaded the collector logs. Events stop arriving roughly two minutes after the service starts.",
+      "processed_summary": "The collector authenticates, ships one batch, then stops. Attached logs cover the first five minutes after start-up.",
+      "ticket_summary": "Event shipping halts shortly after the collector starts.",
+      "key_issues": [
+        "Event shipping stops after the first batch"
+      ],
+      "root_causes": [
+        "The renewal of the shipping token appears to fail silently"
+      ],
+      "suggested_solutions": [
+        "Log token renewal failures at ERROR and retry with backoff"
+      ],
+      "important_notes": [],
+      "error_log_highlights": [
+        {
+          "log_filename": "collector-umbrella-corp-prod07.log",
+          "context": "Shipping halted on host umbrella-corp-prod07",
+          "error_lines": "WARN EventShipper - token renewal returned 401, dropping batch",
+          "exception_line": "com.guardicore.ship.TokenRenewalException: renewal rejected",
+          "source_code_filename": "EventShipper.java"
+        }
+      ],
+      "similar_tickets": []
+    },
+    "expected": {
+      "must_not_contain": [
+        "umbrella-corp-prod07"
+      ],
+      "must_contain": [
+        "GC-7731",
+        "EventShipper.java",
+        "TokenRenewalException",
+        "401"
+      ]
+    }
+  }
+]

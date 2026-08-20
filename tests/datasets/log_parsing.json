@@ -1,0 +1,40 @@
+[
+  {
+    "test_id": "log_parsing_gc136651_orchestration_log",
+    "description": "GC-136651: Real F5 orchestration log with SNATPool ERROR among many INFO lines",
+    "input": {
+      "log_text": "Extracted error context:\n\n2026-01-05 12:45:34,544 [1187305:GreenThread-3:INFO] rabbit._process_message.533: Component id: AGR-6F082042-E609-C5D8-E985-20AD0271238E received message type nop with no callback registered\n2026-01-05 12:45:47,112 [1187305:GreenThread-3:INFO] rabbit._process_message.533: Component id: AGR-6F082042-E609-C5D8-E985-20AD0271238E received message type aggregator_notify_aggregators_list_change with no callback registered\n2026-01-05 12:45:50,655 [1187305:orchestration-spawn:INFO] __init__._do_update.174: Call orchestration cache update\n2026-01-05 12:46:02,136 [1187305:GreenThread-3:INFO] rabbit._process_message.533: Component id: AGR-6F082042-E609-C5D8-E985-20AD0271238E received message type aggregator_notify_aggregators_list_change with no callback registered\n2026-01-05 12:46:04,555 [1187305:GreenThread-3:INFO] rabbit._process_message.533: Component id: AGR-6F082042-E609-C5D8-E985-20AD0271238E received message type nop with no callback registered\n2026-01-05 12:46:20,657 [1187305:orchestration-spawn:INFO] __init__._do_update.174: Call orchestration cache update\n2026-01-05 12:47:03,264 [1187305:orchestration-spawn:ERROR] model.fetch_all.172: LocalLB.LocalLB.SNATPool.get_member_v2 failed: \"[/Common/DNS-old-Vlan761, /Common/ISE-SNAT, /Common/Octane-NAT, /Common/dns-snat-pool, /Common/isrwslproxy-snat, /Common/ms365proxy-snat, /Common/snat-pool-apache]\" is not valid for Common.StringSequence; expecting: _arrayType, _offset, _id, _href, _arrayType\n2026-01-05 12:47:04,560 [1187305:GreenThread-3:INFO] rabbit._process_message.533: Component id: AGR-6F082042-E609-C5D8-E985-20AD0271238E received message type nop with no callback registered\n2026-01-05 12:47:23,867 [1187305:orchestration-spawn:INFO] orchestration_service.update.90: query known ips\n2026-01-05 12:47:23,871 [1187305:orchestration-spawn:INFO] orchestration_service.update.117: 976 ip records updates sent\n2026-01-05 12:47:23,871 [1187305:orchestration-spawn:INFO] __init__.update_management_orchestration.277: Update management orchestration vms hosts networks\n2026-01-05 12:47:24,033 [1187305:orchestration-spawn:INFO] __init__._do_update.223: Update finished successfully\n2026-01-05 12:48:54,038 [1187305:orchestration-spawn:INFO] __init__._do_update.174: Call orchestration cache update\n2026-01-05 13:12:37,944 [1187305:orchestration-spawn:ERROR] model.fetch_all.172: LocalLB.LocalLB.SNATPool.get_member_v2 failed: \"[/Common/DNS-old-Vlan761, /Common/ISE-SNAT, /Common/Octane-NAT, /Common/dns-snat-pool, /Common/isrwslproxy-snat, /Common/ms365proxy-snat, /Common/snat-pool-apache]\" is not valid for Common.StringSequence; expecting: _arrayType, _offset, _id, _href, _arrayType\n2026-01-05 13:13:00,067 [1187305:orchestration-spawn:INFO] orchestration_service.update.90: query known ips\n2026-01-05 13:13:00,071 [1187305:orchestration-spawn:INFO] orchestration_service.update.117: 976 ip records updates sent\n2026-01-05 13:13:00,231 [1187305:orchestration-spawn:INFO] __init__._do_update.223: Update finished successfully",
+      "filename": "aggr-orchestration-f5.log"
+    },
+    "expected": {
+      "min_errors": 1,
+      "max_errors": 2,
+      "must_contain_keywords": ["ERROR", "SNATPool"],
+      "error_lines_must_contain": ["ERROR"],
+      "filename": "aggr-orchestration-f5.log"
+    },
+    "rubric": {
+      "captures_error_verbatim": "Error lines should contain the exact ERROR log line about SNATPool.get_member_v2 failed, not a summary",
+      "deduplicates_repeated_errors": "The two identical SNATPool errors should be deduplicated into 1 entry (or at most 2)",
+      "context_makes_sense": "Context should explain SNAT pool member retrieval failure due to invalid StringSequence data type",
+      "does_not_include_info_lines": "Should not include INFO lines as errors"
+    }
+  },
+  {
+    "test_id": "log_parsing_clean_log_no_errors",
+    "description": "Real-style orchestration log with only INFO lines - should produce no errors",
+    "input": {
+      "log_text": "2026-01-05 12:45:50,655 [1187305:orchestration-spawn:INFO] __init__._do_update.174: Call orchestration cache update\n2026-01-05 12:46:02,136 [1187305:GreenThread-3:INFO] rabbit._process_message.533: Component id: AGR-6F082042-E609-C5D8-E985-20AD0271238E received message type aggregator_notify_aggregators_list_change with no callback registered\n2026-01-05 12:47:23,867 [1187305:orchestration-spawn:INFO] orchestration_service.update.90: query known ips\n2026-01-05 12:47:23,871 [1187305:orchestration-spawn:INFO] orchestration_service.update.117: 976 ip records updates sent\n2026-01-05 12:47:24,033 [1187305:orchestration-spawn:INFO] __init__._do_update.223: Update finished successfully",
+      "filename": "clean-orchestration.log"
+    },
+    "expected": {
+      "min_errors": 0,
+      "must_contain_keywords": [],
+      "error_lines_must_contain": [],
+      "filename": "clean-orchestration.log"
+    },
+    "rubric": {
+      "no_false_positives": "Should not extract any errors from a log with only INFO lines"
+    }
+  }
+]

@@ -1,0 +1,69 @@
+[
+  {
+    "test_id": "final_summary_gc133039",
+    "description": "GC-133039: Real F5 Orchestration NoSuchOptError ticket with comments explaining root cause",
+    "input": {
+      "jira_issue": {
+        "key": "GC-133039",
+        "summary": "[DCU] F5 Orchestration not working complaining about NoSuchOptError: no such option: BEg",
+        "description": "Customer Setup: \nEnvironment URL: https://self-service.saas.guardicore.com/app/environment?env_id=096d9630-22fa-4c85-a980-f01fbb499f34\nCentra Version: v51.8.1-250402.eaf24bc.720\n-----\nIssue and Symptoms: F5 Orchestration is not working and showing no data:\nIf you check connectivity it shows successful messages however no data is updated.\nFrom logs we can see the following exception after upgrade of F5's from v17.1.2.2 to v17.1.3.\n\nCustomer confirms there is not such an option like BEg in F5 configuration.\n\n----\nBusiness Impact: Orchestration is not working.\n----\nNeed from R&D: Short and long term mitigation",
+        "labels": [],
+        "issue_type": "Bug",
+        "priority": "Medium",
+        "components": ["Orchestration Management [Management]"],
+        "status": "Rejected",
+        "created": "2025-12-01T20:35:19.662+0200"
+      },
+      "comments_text": "Roy Honigman: It's a duplicate of  .The issue is that the password likely contains a $, and there is a problem with escaping it. This was resolved in later versions.\nFor now, the solution is to change the customer's password to one that does not include the $ character, or try escaping it by using \"\\$\" instead of \"$\".\nAfter upgrading to a newer version where  is applied, the issue will no longer occur.\nIf the issue remains unresolved, please reopen.",
+      "summarized_attachments": "**Errors:**\n- Log File: `ticket_description`\n  File in code: `cfg.py`\n  Exception: common.py.utils.config.oslo_config.cfg.NoSuchOptError: no such option: BEg\n  Error: \"Traceback showing NoSuchOptError during config loading\"\n  Context: Configuration loading failed due to an unrecognized oslo_config option 'BEg' (NoSuchOptError).\n\n**Images:**\nimage 1 summary:\nUI table shows multiple entries with Enabled status. Three rows show 'No Data' with red warning icons. Top-right tooltip: 'Last update received 29 days ago'.\n\nimage 2 summary:\nGreen checkmark with text 'Orchestration connection successful'.",
+      "related_issues_text": "No related issues for the ticket."
+    },
+    "expected": {
+      "summary_must_contain": ["NoSuchOptError", "BEg"],
+      "summary_max_sentences": 5,
+      "min_main_issues": 1,
+      "min_root_causes": 1,
+      "main_issues_must_mention": ["orchestration"],
+      "comments_must_not_be_empty": true
+    },
+    "rubric": {
+      "summary_accuracy": "Summary should mention F5 Orchestration failure with NoSuchOptError: BEg after upgrade",
+      "root_cause_grounded": "Root causes should mention password containing $ causing escaping issues (from the comments), not hallucinated causes",
+      "no_hallucination": "Should not invent details not present in the input",
+      "comments_captured": "Should mention the password escaping workaround from comments"
+    }
+  },
+  {
+    "test_id": "final_summary_gc85413",
+    "description": "GC-85413: Flask KeyError os_display_name in rest-server with resolution comment",
+    "input": {
+      "jira_issue": {
+        "key": "GC-85413",
+        "summary": "[RC v50.4.0-240418.a065781.502] | Colossus | exception in management service \"rest-server\" | \"KeyError: 'os_display_name'\"",
+        "description": "env: \nversion: v50.4.0-240418.a065781.502\nduring manual RC verification on Colossus, got the following exception in \"rest-server\" when selected windows10 workload option in \"installation instructions\" page:\nFlask exception received with KeyError: 'os_display_name' in assets.py line 1754, in _is_endpoint_os",
+        "labels": ["colossus", "rc_v50.4.0"],
+        "issue_type": "Bug",
+        "priority": "High",
+        "components": ["ZZZ - DO NOT USE - OLD Management [Management]"],
+        "status": "Rejected",
+        "created": "2024-04-28T13:25:43.336+0300"
+      },
+      "comments_text": "Roy Honigman: it was already solved in (in master, v50.4 and v50.4.R)",
+      "summarized_attachments": "**Errors:**\n- Log File: `ticket_description`\n  File in code: `assets.py`\n  Exception: KeyError: 'os_display_name'\n  Error: \"Flask exception with traceback ending in KeyError: 'os_display_name'\"\n  Context: A KeyError was raised during asset lookup; the key 'os_display_name' was missing from a dictionary.\n\nNo images to analyze.",
+      "related_issues_text": "No related issues for the ticket."
+    },
+    "expected": {
+      "summary_must_contain": ["KeyError", "os_display_name"],
+      "summary_max_sentences": 5,
+      "min_main_issues": 1,
+      "min_root_causes": 0,
+      "main_issues_must_mention": ["KeyError"],
+      "comments_must_not_be_empty": true
+    },
+    "rubric": {
+      "summary_accuracy": "Summary should mention the KeyError: os_display_name in the rest-server / assets.py",
+      "captures_resolution": "Should note the issue was already resolved in master/v50.4 from comments",
+      "no_hallucination": "Should not invent root causes or details beyond what's provided"
+    }
+  }
+]

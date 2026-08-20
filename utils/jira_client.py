@@ -10,9 +10,12 @@ from requests.auth import HTTPBasicAuth
 
 
 load_dotenv()
-ATLASSIAN_INSTANCE_URL = os.environ["ATLASSIAN_INSTANCE_URL"]
-ATLASSIAN_EMAIL = os.environ["ATLASSIAN_EMAIL"]
-ATLASSIAN_TOKEN = os.environ["ATLASSIAN_API_TOKEN"]
+# Resolved lazily at JiraClient instantiation rather than at import, so that
+# callers holding their own credentials (e.g. a per-request user token) can
+# import this module without the service account environment being configured.
+ATLASSIAN_INSTANCE_URL = os.environ.get("ATLASSIAN_INSTANCE_URL")
+ATLASSIAN_EMAIL = os.environ.get("ATLASSIAN_EMAIL")
+ATLASSIAN_TOKEN = os.environ.get("ATLASSIAN_API_TOKEN")
 GUARDICORE_PROJECT_NAME = "Ticket Solver"
 
 
@@ -181,9 +184,35 @@ class JiraClient:
     JIRA_ISSUES_URL = "/rest/api/3/search/jql"
     JIRA_ATTACHMENT_CONTENT_URL = "/rest/api/3/attachment/content"
 
-    def __init__(self):
-        self.base_url = ATLASSIAN_INSTANCE_URL
-        self.auth = HTTPBasicAuth(ATLASSIAN_EMAIL, ATLASSIAN_TOKEN)
+    def __init__(
+        self,
+        instance_url: Optional[str] = None,
+        email: Optional[str] = None,
+        api_token: Optional[str] = None,
+    ):
+        """Create a client. Any credential left as None falls back to the
+        environment, so existing callers keep working unchanged."""
+        resolved_url = instance_url or ATLASSIAN_INSTANCE_URL
+        resolved_email = email or ATLASSIAN_EMAIL
+        resolved_token = api_token or ATLASSIAN_TOKEN
+
+        missing = [
+            name
+            for name, value in (
+                ("ATLASSIAN_INSTANCE_URL", resolved_url),
+                ("ATLASSIAN_EMAIL", resolved_email),
+                ("ATLASSIAN_API_TOKEN", resolved_token),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError(
+                f"Missing Jira credentials: {', '.join(missing)}. "
+                "Pass them to JiraClient(...) or set them in the environment."
+            )
+
+        self.base_url = resolved_url
+        self.auth = HTTPBasicAuth(resolved_email, resolved_token)
         self.headers = {"Accept": "application/json"}
 
         # Reuse TCP connections; avoids leaving many sockets around
@@ -231,6 +260,21 @@ class JiraClient:
         response.raise_for_status()
 
         return JiraIssue.from_dict(response.json())
+
+    def can_access_issue(self, issue_key: str) -> bool:
+        """Lightweight probe: may this client's credential read the issue?
+
+        Requests only the key, so nothing sensitive is transferred. Jira answers
+        404 for issues the caller is not allowed to see, so 403 and 404 both mean
+        "no". Anything else -- notably a 401 for a rejected credential -- is
+        raised for the caller to interpret.
+        """
+        url = f"{self.base_url}/rest/api/3/issue/{issue_key}"
+        response = self._session.get(url, params={"fields": "key"})
+        if response.status_code in (403, 404):
+            return False
+        response.raise_for_status()
+        return True
 
     def download_attachment(self, attachment_id: str) -> bytes:
         """Download attachment content"""

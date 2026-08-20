@@ -1,0 +1,98 @@
+[
+  {
+    "test_id": "intent_001",
+    "description": "New ticket key without current ticket",
+    "input": {
+      "user_message": "GC-1234",
+      "current_ticket_key": null,
+      "similar_ticket_keys": []
+    },
+    "expected": {
+      "intent": "analyze_new_ticket"
+    }
+  },
+  {
+    "test_id": "intent_002",
+    "description": "URL with ticket key",
+    "input": {
+      "user_message": "https://mycompany.atlassian.net/browse/GC-5678",
+      "current_ticket_key": null,
+      "similar_ticket_keys": []
+    },
+    "expected": {
+      "intent": "analyze_new_ticket"
+    }
+  },
+  {
+    "test_id": "intent_003",
+    "description": "Follow-up question about current ticket (same key)",
+    "input": {
+      "user_message": "What is the root cause of GC-1234?",
+      "current_ticket_key": "GC-1234",
+      "similar_ticket_keys": ["GC-1111", "GC-2222"]
+    },
+    "expected": {
+      "intent": "follow_up_on_current_ticket"
+    }
+  },
+  {
+    "test_id": "intent_004",
+    "description": "Asking about a similar ticket (should be follow-up)",
+    "input": {
+      "user_message": "Tell me more about GC-1111",
+      "current_ticket_key": "GC-1234",
+      "similar_ticket_keys": ["GC-1111", "GC-2222"]
+    },
+    "expected": {
+      "intent": "follow_up_on_current_ticket"
+    }
+  },
+  {
+    "test_id": "intent_005",
+    "description": "New ticket key while analyzing different ticket",
+    "input": {
+      "user_message": "analyze GC-9999",
+      "current_ticket_key": "GC-1234",
+      "similar_ticket_keys": ["GC-1111"]
+    },
+    "expected": {
+      "intent": "analyze_new_ticket"
+    }
+  },
+  {
+    "test_id": "intent_006",
+    "description": "Greeting with no current ticket",
+    "input": {
+      "user_message": "Hello, how are you?",
+      "current_ticket_key": null,
+      "similar_ticket_keys": []
+    },
+    "expected": {
+      "intent": "unrelated_chat"
+    }
+  },
+  {
+    "test_id": "intent_007",
+    "description": "Multiple ticket keys",
+    "input": {
+      "user_message": "compare GC-1234 and GC-5678",
+      "current_ticket_key": null,
+      "similar_ticket_keys": []
+    },
+    "expected": {
+      "intent": "more_than_one_key"
+    }
+  },
+  {
+    "test_id": "intent_008",
+    "description": "No key, no current ticket - general question",
+    "input": {
+      "user_message": "What can you do?",
+      "current_ticket_key": null,
+      "similar_ticket_keys": []
+    },
+    "expected": {
+      "intent": "unrelated_chat"
+    }
+  }
+]

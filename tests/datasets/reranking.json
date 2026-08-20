@@ -1,0 +1,51 @@
+[
+  {
+    "test_id": "rerank_gc133039_real_candidates",
+    "description": "GC-133039: Rerank real candidate tickets from RAG against F5 orchestration NoSuchOptError ticket",
+    "input": {
+      "current_ticket": {
+        "key": "GC-133039",
+        "summary": "F5 Orchestration fails to initialize after upgrade to v17.1.3, reporting NoSuchOptError: no such option: BEg during oslo_config parsing. Connectivity is OK but no data is updated; UI shows 'No Data' with warnings.",
+        "description": "F5 Orchestration is not working and showing no data after upgrade of F5's from v17.1.2.2 to v17.1.3. NoSuchOptError: no such option: BEg. Password likely contains a $ causing escaping issue in config parsing."
+      },
+      "candidates": [
+        {
+          "key": "GC-142273",
+          "title": "[Functional Aggregator][ApiSec] Error running orchestration service of type 'apisec'",
+          "summary": "Nightly Functional Aggregator tests for ApiSec fail during orchestration; the orchestration log shows a Python traceback culminating in a Pydantic ValidationError for ReportOrchestrationUpdateRequest."
+        },
+        {
+          "key": "GC-141550",
+          "title": "[Tuna- v53.1.0] - Aggregator Startup Failure - Error connecting to management server",
+          "summary": "Aggregator Startup Failure caused by inability to connect to management server via RabbitMQ. ConnectionRefusedError to 127.0.0.1:18443."
+        },
+        {
+          "key": "GC-127909",
+          "title": "[K8S][Orchestration] - Auth host field doesn't support configuration of a path",
+          "summary": "Bug in Kubernetes orchestration where aggregator concatenated auth host and port without considering a defined path in the auth host field."
+        },
+        {
+          "key": "GC-134136",
+          "title": "Error connecting to integration: 'connection_info' on registering with Packetfence",
+          "summary": "Error during PacketFence integration with centra via PF collector: 'Error connecting to integration: connection_info'. Test connection fails."
+        },
+        {
+          "key": "GC-127592",
+          "title": "[Functional Aggregator Lab] [ERROR] the sflow sample length is invalid",
+          "summary": "Functional Aggregator Lab test for the flow collector fails with an invalid sflow sample length error. Unrelated to config parsing."
+        }
+      ]
+    },
+    "expected": {
+      "highest_score_key": "GC-142273",
+      "lowest_score_key": "GC-127592",
+      "all_candidates_scored": true,
+      "scores_are_0_to_10": true
+    },
+    "rubric": {
+      "orchestration_tickets_ranked_higher": "GC-142273 (orchestration error) and GC-127909 (orchestration config) should score higher than GC-127592 (sflow/flow collector, unrelated)",
+      "irrelevant_scored_low": "GC-127592 (sflow sample length) should score low as it's about packet processing, not config parsing",
+      "reasons_are_specific": "Reasons should mention specific similarities like 'orchestration service failure' or 'config parsing' not generic phrases"
+    }
+  }
+]
