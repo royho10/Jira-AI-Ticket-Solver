@@ -27,7 +27,7 @@ tests/
 │   ├── test_llm_logger.py       # The prompt log's off switch (used by the server)
 │   ├── test_ticket_analyzer.py  # Analysis pipeline orchestration (services mocked)
 │   ├── test_pii_sanitizer.py    # Redaction mechanics and fail-closed behaviour
-│   └── test_mcp_server.py       # Remote MCP Server via FastAPI TestClient
+│   └── test_mcp_server.py       # Remote MCP Server via FastAPI TestClient (JSON + SSE progress)
 ├── integration/             # End-to-end pipeline tests
 │   └── test_full_pipeline.py    # JiraIssue -> process_issue -> validate output
 └── eval/                    # LLM-as-Judge quality evaluation
@@ -84,6 +84,7 @@ python -m pytest -m deterministic -v
 - **MCP server tests**: `create_app(analyzer=..., sanitizer=..., access_checker=...)` takes hand-written fakes (not `MagicMock`) so each test can assert what the collaborator was called with; drive it with `TestClient` and JSON-RPC bodies.
 - **Secrets must not leak**: tests that send a Jira token assert it appears in neither the response body nor `caplog`. Keep that assertion in any new test that carries credentials.
 - **Auth failures are `isError` tool results, not HTTP 4xx**: use the `assert_tool_error(response)` helper. A 401 on `/mcp` would send a real MCP client into OAuth discovery, so only Origin rejection answers with a status code (403).
+- **`POST /mcp` has two response shapes**: a `tools/call` carrying `_meta.progressToken` is answered with `text/event-stream` (progress notifications, then the result); without one it stays a single JSON body. Drive the streaming one with `call_tool_streaming()`, which returns `(content_type, events)`; keep using `call_tool()` for the JSON path. Any new tool-call test should cover both shapes, since the back-compat path is easy to break silently.
 - **"Did it block the event loop?"**: `ran_off_the_event_loop()` in `test_mcp_server.py` calls `asyncio.get_running_loop()` from inside a fake collaborator — it only succeeds on the loop's own thread, so it is an exact check. Don't try to prove this with concurrent `TestClient` requests: starlette spins a fresh event loop per request, so such a test passes even when the offload is removed.
 
 ## Adding New Tests

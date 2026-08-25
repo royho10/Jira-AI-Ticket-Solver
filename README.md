@@ -215,28 +215,48 @@ Endpoints:
 | `GET /mcp` | Server-initiated event stream (keep-alive only today) |
 | `GET /health` | Liveness check for monitoring |
 
+A `tools/call` carrying `_meta.progressToken` is answered with an SSE stream of
+`notifications/progress` events followed by the result. Without a token the answer
+is a single JSON body, so plain `curl` keeps working unchanged.
+
 ### Connecting from Claude Code
 
-Add the server to `~/.claude/settings.json` with your own Jira credentials:
+Register the server with your own Jira credentials:
 
-```json
-{
-  "mcpServers": {
-    "jira-ticket-solver": {
-      "type": "streamable-http",
-      "url": "https://ticket-solver.your-company.internal/mcp",
-      "headers": {
-        "X-Jira-Email": "you@your-company.com",
-        "X-Jira-Token": "your_jira_api_token"
-      }
-    }
-  }
-}
+```bash
+claude mcp add -s user --transport http jira-ticket-solver \
+  https://ticket-solver.your-company.internal/mcp \
+  -H "X-Jira-Email: you@your-company.com" \
+  -H "X-Jira-Token: your_jira_api_token"
 ```
+
+`-s user` keeps your token in `~/.claude.json` and makes the server available in
+every project. Use `-s project` only if you are willing to commit the config to
+git — the token would go with it. Check the result with `claude mcp list`, which
+should report `✔ Connected`.
 
 Then ask Claude to analyze a ticket — it calls `analyze_ticket(ticket_key)` and
 gets back markdown plus a structured `<ticket_analysis>` block it can reason over
 for follow-up questions.
+
+### Raise the tool timeout — analyses take minutes
+
+A full analysis runs for several minutes (LLM summarization, attachment
+processing, vector search and the redaction pass). Claude Code times remote MCP
+tool calls out after **60 seconds** by default, which is not long enough. Raise it
+in the `env` block of `~/.claude/settings.json`:
+
+```json
+{
+  "env": {
+    "MCP_TOOL_TIMEOUT": "900000"
+  }
+}
+```
+
+The server reports progress while it works, so you see the current stage rather
+than a silent wait — but the timeout still has to be raised, because the MCP spec
+leaves resetting the clock on progress up to the client.
 
 ### How credentials are handled
 

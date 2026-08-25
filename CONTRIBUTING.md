@@ -147,6 +147,27 @@ curl -s http://localhost:8000/mcp \
 A real tool call needs `X-Jira-Email` and `X-Jira-Token` headers. Terminate TLS in front
 of the server in any shared deployment — user Jira tokens travel in those headers.
 
+To watch the analysis progress instead of waiting several minutes in silence, add a
+`_meta.progressToken` and read the response as a stream (`curl -N`):
+
+```bash
+curl -N -s http://localhost:8000/mcp \
+  -H 'Content-Type: application/json' \
+  -H "X-Jira-Email: $EMAIL" -H "X-Jira-Token: $TOKEN" \
+  -d '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{
+       "name":"analyze_ticket","arguments":{"ticket_key":"GC-1234"},
+       "_meta":{"progressToken":"t1"}}}'
+```
+
+```
+data: {"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"t1","progress":1,"message":"📥 **Analyzing ticket...**"}}
+data: {"jsonrpc":"2.0","method":"notifications/progress","params":{"progressToken":"t1","progress":2,"message":"🔍 **Finding similar tickets...**"}}
+data: {"jsonrpc":"2.0","id":4,"result":{"content":[{"type":"text","text":"# GC-1234: ..."}]}}
+```
+
+The token is echoed exactly as sent — Claude Code sends an integer, so don't coerce it
+to a string. Omitting `_meta` keeps the single-JSON-body response.
+
 ### Verify Services
 
 ```bash

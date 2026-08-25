@@ -737,3 +737,226 @@ def test_an_upstream_error_is_surfaced_as_a_bad_gateway():
 
     assert_tool_error(response)
     assert analyzer.calls == []
+
+
+# ---------------------------------------------------------------------------
+# Progress notifications
+#
+# An analysis runs for minutes. When the client supplies a progress token the
+# tool call is answered with an SSE stream carrying `notifications/progress`
+# followed by the result, so the user sees what is happening instead of a
+# silent wait. Without a token the response stays a single JSON body.
+# ---------------------------------------------------------------------------
+class ProgressAnalyzer:
+    """An analyzer that reports a few stages, the way the real one does."""
+
+    STAGES = ("Analyzing ticket...", "Finding similar tickets...", "Finalizing...")
+
+    def __init__(self, analysis=None, error=None):
+        self._analysis = analysis if analysis is not None else make_analysis()
+        self._error = error
+        self.progress_callbacks = []
+
+    def analyze(self, ticket_key, on_progress=None):
+        self.progress_callbacks.append(on_progress)
+        for stage in self.STAGES:
+            if on_progress:
+                on_progress(stage)
+        if self._error:
+            raise self._error
+        return self._analysis
+
+
+def call_tool_streaming(client, ticket_key="GC-100", progress_token="tok-1",
+                        headers=AUTH_HEADERS, analyzer_name="analyze_ticket"):
+    """Drive a tool call that asks for progress, returning the parsed SSE events."""
+    params = {"name": analyzer_name, "arguments": {"ticket_key": ticket_key}}
+    if progress_token is not None:
+        params["_meta"] = {"progressToken": progress_token}
+    with client.stream("POST", "/mcp", json=rpc("tools/call", params), headers=headers) as response:
+        assert response.status_code == 200
+        content_type = response.headers["content-type"]
+        events = [
+            json.loads(line[len("data:"):].strip())
+            for line in response.iter_lines()
+            if line.startswith("data:")
+        ]
+    return content_type, events
+
+
+def progress_events(events):
+    return [e for e in events if e.get("method") == "notifications/progress"]
+
+
+@pytest.mark.deterministic
+def test_a_progress_token_switches_the_response_to_an_event_stream():
+    client, _, _, _ = build_client(analyzer=ProgressAnalyzer())
+
+    content_type, _ = call_tool_streaming(client)
+
+    assert content_type.startswith("text/event-stream")
+
+
+@pytest.mark.deterministic
+def test_progress_notifications_echo_the_clients_token():
+    client, _, _, _ = build_client(analyzer=ProgressAnalyzer())
+
+    _, events = call_tool_streaming(client, progress_token="tok-abc")
+    notifications = progress_events(events)
+
+    assert notifications, "expected at least one progress notification"
+    assert all(n["params"]["progressToken"] == "tok-abc" for n in notifications)
+
+
+@pytest.mark.deterministic
+def test_a_numeric_progress_token_stays_numeric():
+    """Claude Code sends an integer token; echoing it as a string breaks correlation."""
+    client, _, _, _ = build_client(analyzer=ProgressAnalyzer())
+
+    _, events = call_tool_streaming(client, progress_token=2)
+
+    tokens = [n["params"]["progressToken"] for n in progress_events(events)]
+    assert tokens and all(t == 2 for t in tokens)
+
+
+@pytest.mark.deterministic
+def test_progress_values_strictly_increase():
+    client, _, _, _ = build_client(analyzer=ProgressAnalyzer())
+
+    _, events = call_tool_streaming(client)
+    values = [n["params"]["progress"] for n in progress_events(events)]
+
+    assert values == sorted(values)
+    assert len(set(values)) == len(values)
+
+
+@pytest.mark.deterministic
+def test_the_analysis_stages_reach_the_client_as_messages():
+    client, _, _, _ = build_client(analyzer=ProgressAnalyzer())
+
+    _, events = call_tool_streaming(client)
+    messages = [n["params"]["message"] for n in progress_events(events)]
+
+    for stage in ProgressAnalyzer.STAGES:
+        assert stage in messages
+
+
+@pytest.mark.deterministic
+def test_the_redaction_pass_reports_progress_too():
+    """The sanitizer is another multi-second LLM call; it should not be silent."""
+    client, _, _, _ = build_client(analyzer=ProgressAnalyzer())
+
+    _, events = call_tool_streaming(client)
+    messages = [n["params"]["message"].lower() for n in progress_events(events)]
+
+    assert any("redact" in m for m in messages)
+
+
+@pytest.mark.deterministic
+def test_the_stream_ends_with_the_analysis_result():
+    client, _, _, _ = build_client(analyzer=ProgressAnalyzer())
+
+    _, events = call_tool_streaming(client)
+    final = events[-1]
+
+    assert final["id"] == 1
+    assert final["jsonrpc"] == "2.0"
+    assert "GC-100" in "\n".join(b["text"] for b in final["result"]["content"])
+
+
+@pytest.mark.deterministic
+def test_progress_arrives_before_the_result():
+    client, _, _, _ = build_client(analyzer=ProgressAnalyzer())
+
+    _, events = call_tool_streaming(client)
+    kinds = ["progress" if e.get("method") else "result" for e in events]
+
+    assert kinds.count("result") == 1
+    assert kinds.index("result") == len(kinds) - 1
+
+
+@pytest.mark.deterministic
+def test_a_tool_call_without_a_progress_token_still_returns_plain_json():
+    """Back-compat: plain curl and every existing client keep the single JSON body."""
+    client, _, _, _ = build_client(analyzer=ProgressAnalyzer())
+
+    response = call_tool(client)
+
+    assert response.headers["content-type"].startswith("application/json")
+    assert "GC-100" in tool_text(response)
+
+
+@pytest.mark.deterministic
+def test_the_analyzer_gets_no_callback_when_no_progress_was_asked_for():
+    analyzer = ProgressAnalyzer()
+    client, _, _, _ = build_client(analyzer=analyzer)
+
+    call_tool(client)
+
+    assert analyzer.progress_callbacks == [None]
+
+
+@pytest.mark.deterministic
+def test_an_access_failure_ends_the_stream_with_an_error_result():
+    checker = FakeAccessChecker(
+        error=AuthError(AuthErrorCode.ACCESS_DENIED, "You do not have access to GC-100")
+    )
+    client, _, _, _ = build_client(analyzer=ProgressAnalyzer(), access_checker=checker)
+
+    _, events = call_tool_streaming(client)
+    final = events[-1]
+
+    assert final["result"]["isError"] is True
+    assert "access" in final["result"]["content"][0]["text"].lower()
+
+
+@pytest.mark.deterministic
+def test_a_failing_analysis_ends_the_stream_with_an_error_result():
+    client, _, _, _ = build_client(analyzer=ProgressAnalyzer(error=RuntimeError("boom")))
+
+    _, events = call_tool_streaming(client)
+    final = events[-1]
+
+    assert final["result"]["isError"] is True
+
+
+@pytest.mark.deterministic
+def test_a_sanitization_failure_ends_the_stream_without_leaking_the_analysis():
+    sanitizer = FakeSanitizer(error=SanitizationError("redaction pass failed"))
+    client, _, _, _ = build_client(analyzer=ProgressAnalyzer(), sanitizer=sanitizer)
+
+    _, events = call_tool_streaming(client)
+    final = events[-1]
+    body = json.dumps(events)
+
+    assert final["result"]["isError"] is True
+    assert "Collector crashes on startup" not in body
+
+
+@pytest.mark.deterministic
+def test_the_users_token_never_appears_in_the_stream(caplog):
+    client, _, _, _ = build_client(analyzer=ProgressAnalyzer())
+
+    with caplog.at_level(logging.DEBUG):
+        _, events = call_tool_streaming(client)
+
+    assert USER_TOKEN not in json.dumps(events)
+    assert USER_TOKEN not in caplog.text
+
+
+@pytest.mark.deterministic
+def test_a_refused_redaction_logs_why_without_quoting_the_ticket(caplog):
+    """Fail-closed is right, but silent fail-closed cannot be operated: the
+    operator needs the reason, and must not get the customer data with it."""
+    sanitizer = FakeSanitizer(error=SanitizationError(
+        "PII sanitization returned 38 of 41 segments; 3 would have been returned unredacted"
+    ))
+    client, _, _, _ = build_client(sanitizer=sanitizer)
+
+    with caplog.at_level(logging.ERROR):
+        response = call_tool(client)
+
+    assert_tool_error(response)
+    assert "38 of 41 segments" in caplog.text
+    assert "Collector crashes on startup" not in caplog.text
+    assert USER_TOKEN not in caplog.text

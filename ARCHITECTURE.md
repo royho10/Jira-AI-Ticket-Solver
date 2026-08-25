@@ -240,6 +240,22 @@ Collaborators are injected by tests and built from the environment in production
   `MCP_SSE_STREAM_SECONDS` so a vanished client cannot pin a worker.
 - `GET /health` - liveness for monitoring.
 
+**Two response shapes for `tools/call`.** A call carrying `_meta.progressToken` is
+answered with `text/event-stream`: `notifications/progress` events as the pipeline
+advances, then the JSON-RPC result as the final event. Without a token the answer is a
+single JSON body, which is what plain `curl` and any non-progress client expect.
+`_run_analysis()` produces the payload for both paths, so there is one place a failure
+can be turned into an `isError` result.
+
+Progress crosses a thread boundary: the analyzer's `on_progress` callback fires on the
+`run_in_threadpool` worker, and hands messages to the event loop with
+`loop.call_soon_threadsafe`. `progress` increments per message and `total` is omitted —
+the number of stages depends on how many attachments the ticket carries. The token is
+echoed exactly as received; Claude Code sends an integer.
+
+Even with progress, clients still need a raised tool timeout: the MCP spec says progress
+notifications *may* reset the timeout clock, leaving it up to the client.
+
 **Single tool:** `analyze_ticket(ticket_key: str)`. A call runs
 access check -> `TicketAnalyzer.analyze()` -> `PiiSanitizer.sanitize()` -> `format_analysis()`.
 The analysis and the redaction pass are synchronous and can run for minutes, so both — and
@@ -415,7 +431,8 @@ Claude Code ──POST /mcp {"method":"tools/call"}──> mcp_server
                                    │
                                    ▼
         TicketAnalyzer.analyze()            (Jira service account)
-                                   │
+                │                  │         on_progress ──> notifications/progress
+                └──────────────────┤         (when the client sent a progressToken)
                                    ▼
         PiiSanitizer.sanitize()             (mandatory; fails closed)
                                    │

@@ -15,7 +15,7 @@ import json
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Sequence
+from typing import Any, Callable, Dict, Optional, Sequence
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
@@ -100,6 +100,25 @@ def _tool_text(text: str, is_error: bool = False) -> Dict[str, Any]:
 
 def _elapsed_ms(started: float) -> int:
     return int((time.time() - started) * 1000)
+
+
+def _sse(payload: Dict[str, Any]) -> bytes:
+    return f"data: {json.dumps(payload)}\n\n".encode()
+
+
+def _progress_notification(token: Any, step: int, message: str) -> Dict[str, Any]:
+    """A `notifications/progress` for a long-running tool call.
+
+    `total` is deliberately omitted: the number of stages depends on how many
+    attachments a ticket carries, so any total we announced would be a guess.
+    The token is echoed exactly as the client sent it -- Claude Code sends an
+    integer, and stringifying it would break correlation.
+    """
+    return {
+        "jsonrpc": "2.0",
+        "method": "notifications/progress",
+        "params": {"progressToken": token, "progress": step, "message": message},
+    }
 
 
 def _ensure_usage_log_handler() -> None:
@@ -246,6 +265,24 @@ def create_app(
             return _error(request_id, INVALID_PARAMS, "'ticket_key' is required")
         ticket_key = ticket_key.strip().upper()
 
+        # A client that wants to watch the analysis sends a progress token. That
+        # turns the answer into an event stream; without one it stays a single
+        # JSON body, which is what plain curl and any non-progress client expect.
+        progress_token = (params.get("_meta") or {}).get("progressToken")
+        if progress_token is None:
+            return _result(request_id, await _run_analysis(request, ticket_key, None))
+        return _streaming_tool_call(request, request_id, ticket_key, progress_token)
+
+    async def _run_analysis(
+        request: Request,
+        ticket_key: str,
+        on_progress: Optional[Callable[[str], None]],
+    ) -> Dict[str, Any]:
+        """Run the pipeline and return the tool result payload.
+
+        Every failure becomes an `isError` payload rather than an exception, so
+        both delivery paths have exactly one thing to send back.
+        """
         started = time.time()
         email = None
         try:
@@ -254,7 +291,7 @@ def create_app(
             await run_in_threadpool(access_checker.verify_access, email, token, ticket_key)
         except AuthError as e:
             _log_usage(email or "unknown", ticket_key, e.code.value, _elapsed_ms(started))
-            return _result(request_id, _tool_text(e.message, is_error=True))
+            return _tool_text(e.message, is_error=True)
 
         # The token has done its job; from here on only the identity travels on.
         del token
@@ -263,23 +300,80 @@ def create_app(
             # The analysis and the redaction pass are synchronous and can run for
             # minutes; run them in a worker so /health and other requests stay
             # answerable.
-            analysis = await run_in_threadpool(analyzer.analyze, ticket_key)
+            analysis = await run_in_threadpool(analyzer.analyze, ticket_key, on_progress)
+            if on_progress:
+                on_progress("🛡️ **Redacting customer data...**")
             sanitized = await run_in_threadpool(sanitizer.sanitize, analysis)
-        except SanitizationError:
+        except SanitizationError as e:
+            # Safe to log: `SanitizationError` messages never quote the text that
+            # failed redaction. Without this the operator sees only the outcome and
+            # cannot tell a model completeness failure from an outage.
+            logger.error(f"Redaction refused the analysis of {ticket_key}: {e}")
             _log_usage(email, ticket_key, "sanitization_error", _elapsed_ms(started))
-            return _result(request_id, _tool_text(
+            return _tool_text(
                 f"Could not return the analysis of {ticket_key}: the required redaction "
                 "pass failed, so nothing from the ticket can be shown. Please retry.",
                 is_error=True,
-            ))
+            )
         except Exception as e:
             logger.exception(f"Analysis of {ticket_key} failed")
             _log_usage(email, ticket_key, "error", _elapsed_ms(started))
-            return _result(request_id, _tool_text(
-                f"Failed to analyze {ticket_key}: {e}", is_error=True,
-            ))
+            return _tool_text(f"Failed to analyze {ticket_key}: {e}", is_error=True)
 
         _log_usage(email, ticket_key, "success", _elapsed_ms(started))
-        return _result(request_id, _tool_text(format_analysis(sanitized)))
+        return _tool_text(format_analysis(sanitized))
+
+    def _streaming_tool_call(
+        request: Request,
+        request_id: Any,
+        ticket_key: str,
+        progress_token: Any,
+    ) -> StreamingResponse:
+        """Answer the tool call with progress events followed by the result."""
+        loop = asyncio.get_running_loop()
+        queue: asyncio.Queue = asyncio.Queue()
+
+        def on_progress(message: str) -> None:
+            # Called from the analysis worker thread, so the hand-off back to the
+            # event loop has to be thread-safe.
+            loop.call_soon_threadsafe(queue.put_nowait, message)
+
+        async def event_stream():
+            analysis = asyncio.ensure_future(_run_analysis(request, ticket_key, on_progress))
+            step = 0
+            while True:
+                pending_message = asyncio.ensure_future(queue.get())
+                done, _ = await asyncio.wait(
+                    {pending_message, analysis}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if pending_message in done:
+                    step += 1
+                    yield _sse(_progress_notification(
+                        progress_token, step, pending_message.result()
+                    ))
+                    continue
+                # The analysis finished. Cancelling the waiter leaves any message
+                # already queued in place, so drain before closing the stream.
+                pending_message.cancel()
+                while not queue.empty():
+                    step += 1
+                    yield _sse(_progress_notification(
+                        progress_token, step, queue.get_nowait()
+                    ))
+                break
+
+            error = analysis.exception()
+            if error is not None:
+                logger.exception(f"Streaming analysis of {ticket_key} failed", exc_info=error)
+                payload = _tool_text(f"Failed to analyze {ticket_key}: {error}", is_error=True)
+            else:
+                payload = analysis.result()
+            yield _sse({"jsonrpc": "2.0", "id": request_id, "result": payload})
+
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-store", "X-Accel-Buffering": "no"},
+        )
 
     return app
