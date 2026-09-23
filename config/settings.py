@@ -50,6 +50,14 @@ MCP_ALLOWED_ORIGINS = [
     for origin in os.environ.get("MCP_ALLOWED_ORIGINS", "").split(",")
     if origin.strip()
 ]
+# Prompt/response logging is off on the MCP server by default: prompts carry raw
+# ticket text belonging to whichever user made the request, and a shared server
+# must not write that to disk. Set this only on a local, single-operator run --
+# it is a debugging aid, not a production setting.
+MCP_LOG_LLM_CALLS = os.environ.get("MCP_LOG_LLM_CALLS", "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+
 MCP_SSE_KEEPALIVE_SECONDS = float(os.environ.get("MCP_SSE_KEEPALIVE_SECONDS", "15"))
 # The event stream is closed after this long so a dropped client cannot pin a
 # worker forever; MCP clients are expected to reconnect.

@@ -59,15 +59,17 @@ An AI-powered Jira ticket analysis platform that uses Azure OpenAI to provide in
 | Component | Technology |
 |-----------|-----------|
 | Web UI | Streamlit |
+| MCP Server | FastAPI + uvicorn (MCP Streamable HTTP) |
 | Vector Database | Weaviate (JiraCollection) |
-| LLM | Azure OpenAI (configurable deployment) |
+| LLM | Azure OpenAI (configurable deployment, default `gpt-5-nano`) |
 | VLM | Azure OpenAI (same deployment handles vision) |
 | Embeddings | text-embedding-3-small (1536 dims, Azure) |
 | Data Validation | Pydantic |
+| Tests | pytest (deterministic / llm_eval / integration tiers) |
 
 ## Prerequisites
 
-- Python 3.8+
+- Python 3.10+ (required by `langchain` 1.x and `streamlit` 1.51)
 - [Weaviate](https://weaviate.io/developers/weaviate/installation) (running locally)
 - Azure OpenAI resource with API access
 - Jira Cloud account with API access
@@ -122,10 +124,14 @@ ATLASSIAN_API_TOKEN=your_api_token_here
 # Required - Azure OpenAI Configuration
 AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com/
 AZURE_OPENAI_API_KEY=your_azure_openai_api_key_here
-AZURE_OPENAI_API_VERSION=2024-02-01
-AZURE_OPENAI_LLM_DEPLOYMENT=gpt-4o-mini
+AZURE_OPENAI_API_VERSION=2024-08-01-preview
+AZURE_OPENAI_LLM_DEPLOYMENT=gpt-5-nano
 AZURE_OPENAI_EMBEDDING_DEPLOYMENT=text-embedding-3-small
 ```
+
+Everything after the Jira block has a default in `config/settings.py`; see
+`.env.example` for the full template, including the optional Weaviate and MCP
+server variables.
 
 ### Getting Jira API Token
 
@@ -301,13 +307,34 @@ Jira-AI-Ticket-Solver/
 │   ├── jira_client.py                  # Jira API client + Pydantic models
 │   ├── weaviate_client.py              # Local/remote Weaviate connection
 │   ├── openai_jira_ticket_processing.py # LLM/VLM processing (Azure OpenAI)
-│   ├── llm_logger.py                   # LLM call logging
+│   ├── llm_logger.py                   # LLM call logging (off on the MCP server)
 │   └── file_utils.py                   # Archive extraction utilities
+├── tests/
+│   ├── unit/                           # Deterministic + mocked-LLM tests
+│   ├── integration/                    # Full pipeline end-to-end
+│   ├── eval/                           # LLM-as-judge quality checks
+│   ├── datasets/                       # JSON cases the tests parametrize from
+│   └── CLAUDE.md                       # Test layout, seams and patterns
+├── run_tests.sh                        # Test runner (per tier)
+├── pytest.ini                          # Test markers
 ├── requirements.txt                    # Python dependencies
 ├── .env.example                        # Environment template
 ├── ARCHITECTURE.md                     # Technical documentation
 └── CONTRIBUTING.md                     # Developer guide
 ```
+
+## Tests
+
+Three tiers, selected by pytest marker — only the first one is free:
+
+```bash
+./run_tests.sh deterministic   # no LLM calls, safe for CI
+./run_tests.sh llm             # real LLM calls, needs Azure OpenAI
+./run_tests.sh integration     # full pipeline, needs Azure OpenAI
+./run_tests.sh all
+```
+
+`tests/CLAUDE.md` documents the layout and the conventions new tests should follow.
 
 ## Analysis Output
 
@@ -319,6 +346,7 @@ The tool provides structured analysis including:
 - **Errors from Logs**: Extracted error messages with context
 - **Similar Tickets**: Related tickets with similarity explanations
 - **Suggested Solutions**: AI-recommended fixes based on historical resolutions
+- **Important Notes**: Caveats and anything else worth flagging
 
 ## License
 

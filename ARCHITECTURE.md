@@ -69,12 +69,14 @@ This document provides detailed technical documentation for the Jira AI Ticket S
 │  ┌─────────────────┐  ┌─────────────────────────────┐  ┌─────────────────┐  │
 │  │   JiraClient    │  │        Weaviate             │  │ Azure OpenAI    │  │
 │  │ (jira_client.py)│  │     (Vector Store)          │  │                 │  │
-│  │                 │  │                             │  │ • gpt-4o-mini   │  │
+│  │                 │  │                             │  │ • gpt-5-nano    │  │
 │  │ • fetch_issues  │  │ • JiraCollection            │  │   (or custom)   │  │
 │  │ • fetch_issue_  │  │   1536-dim vectors          │  │ • text-embed-3  │  │
 │  │   by_key        │  │                             │  │   -small        │  │
 │  │ • download_     │  │ • near_vector queries       │  │                 │  │
 │  │   attachment    │  │ • insert_many               │  │                 │  │
+│  │ • can_access_   │  │                             │  │                 │  │
+│  │   issue         │  │                             │  │                 │  │
 │  └─────────────────┘  └─────────────────────────────┘  └─────────────────┘  │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -92,10 +94,19 @@ Jira REST API client with Pydantic data models.
 - `JiraIssue` - Main issue dataclass aggregating all ticket data
 - `JiraClient` - HTTP client with session reuse for Jira API calls
 
+`JiraClient(instance_url=None, email=None, api_token=None)` - any credential left as
+`None` falls back to the environment, so the app and the indexer construct it with no
+arguments while the Remote MCP Server builds a per-request client from the caller's own
+credential.
+
 **Key Functions:**
 - `fetch_issues(jql, max_results, next_page_token)` - Paginated issue fetch
 - `fetch_issue_by_key(issue_key)` - Single issue retrieval
 - `download_attachment(attachment_id)` - Binary attachment download
+- `can_access_issue(issue_key)` - Access probe requesting the key field only. Jira
+  answers 404 for issues the caller may not see, so 403 and 404 both mean "no"; anything
+  else (notably 401 for a rejected credential) is raised for the caller to interpret.
+- `close()` - Closes the underlying session
 - `extract_text_from_adf(node)` - Atlassian Document Format parser
 - `extract_jira_keys_from_text(text)` - Regex-based key extraction
 
@@ -118,6 +129,7 @@ class ImageAnalysisOutput(BaseModel):
 class ErrorInLog(BaseModel):
     source_code_filename: Optional[str]
     error_lines: str
+    exception_line: Optional[str]
     context: str
 
 class LogAnalysisOutput(BaseModel):
@@ -187,6 +199,19 @@ Single place that decides which Weaviate to talk to.
   to that host, using `WEAVIATE_API_KEY` when one is configured and inferring TLS and
   port 443 from an `https://` URL. Both the app and the indexer go through here, so
   pointing the whole system at a shared instance is an environment change only.
+
+### `utils/llm_logger.py`
+
+Per-call prompt/response log, written to `logs/llm_calls/llm_calls_<timestamp>.log`, plus
+running token and duration totals for a run.
+
+**Functions:** `log_llm_call()`, `log_run_summary()`, `get_run_stats()`,
+`reset_run_stats()`, `is_enabled()`, `disable()`.
+
+`disable()` is a process-wide off switch called by `server/asgi.py`: the prompts carry
+raw, unsanitized ticket text belonging to whichever user made the request, which a shared
+server must not persist. Local runs (Streamlit, the indexer) leave it on — there the
+operator already owns the data.
 
 ### `core/ticket_analyzer.py`
 
@@ -324,7 +349,7 @@ class IntentClassification(Enum):
 5. Display structured analysis with similar tickets
 
 **Configuration:**
-- LLM: Configurable Azure deployment (default: `gpt-4o-mini`)
+- LLM: Configurable Azure deployment (default: `gpt-5-nano`)
 - Vision: Same deployment handles vision
 - Embeddings: `text-embedding-3-small` (Azure deployment)
 
@@ -342,19 +367,30 @@ AZURE_OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-08-0
 # Azure OpenAI Deployment Names
 AZURE_OPENAI_LLM_DEPLOYMENT = os.environ.get("AZURE_OPENAI_LLM_DEPLOYMENT", "gpt-5-nano")
 AZURE_OPENAI_EMBEDDING_DEPLOYMENT = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-small")
+AZURE_OPENAI_TEMPERATURE = 1.0  # gpt-5-nano only supports 1.0
 
 # Weaviate Configuration
 JIRA_COLLECTION_NAME = "JiraCollection"
 WEAVIATE_URL = os.environ.get("WEAVIATE_URL")  # unset -> local Docker instance
 WEAVIATE_API_KEY = os.environ.get("WEAVIATE_API_KEY")
+WEAVIATE_GRPC_PORT = int(os.environ.get("WEAVIATE_GRPC_PORT", "50051"))
 
 # Remote MCP Server
 MCP_ALLOWED_ORIGINS = [...]  # parsed from a comma-separated env var
+MCP_SSE_KEEPALIVE_SECONDS = float(os.environ.get("MCP_SSE_KEEPALIVE_SECONDS", "15"))
+MCP_SSE_STREAM_SECONDS = float(os.environ.get("MCP_SSE_STREAM_SECONDS", "300"))
 
 # Generic Limits
 MAX_EMBEDDINGS_INPUT_CHARS = 4000
 LLM_CALL_TIMEOUT_SECONDS = 60
+
+# Reranking
+RERANK_SCORE_THRESHOLD = 5  # 0-10 scale; tickets below this are filtered out
+MAX_SIMILAR_TICKETS_AFTER_RERANK = 5
 ```
+
+`settings.py` calls `load_dotenv()` at import, so importing it is enough to see `.env`
+whichever entry point (Streamlit, the MCP server, the indexer, pytest) loaded first.
 
 ## Data Flow
 
@@ -393,16 +429,16 @@ User Input (ticket key/question)
            ├──> ANALYZE_NEW_TICKET
            │         │
            │         ▼
-           │    JiraClient.fetch_issue_by_key()
+           │    TicketAnalyzer.analyze(key, on_progress)
+           │         │
+           │         ├──> JiraClient.fetch_issue_by_key()
+           │         ├──> OpenAIJiraIssueLLMProcessor.process_issue()
+           │         ├──> Weaviate.near_vector(embedding)
+           │         ├──> LLM reranking of the candidates
+           │         └──> Generate Final Analysis (LLM)
            │         │
            │         ▼
-           │    OpenAIJiraIssueLLMProcessor.process_issue()
-           │         │
-           │         ▼
-           │    Weaviate.near_vector(embedding)
-           │         │
-           │         ▼
-           │    Generate Final Analysis (LLM)
+           │    TicketAnalysis -> rendered in Streamlit
            │
            ├──> FOLLOW_UP_ON_CURRENT_TICKET
            │         │
@@ -528,6 +564,19 @@ def _get_llm(self) -> AzureChatOpenAI:
 - Cleanup of temporary files in `finally` blocks
 - Silent cleanup failures to preserve original exceptions
 
+## Testing
+
+Three tiers selected by pytest marker (`pytest.ini`), run through `./run_tests.sh
+<tier>`: `deterministic` (no LLM calls, free, CI-safe), `llm_eval` (real LLM calls
+scored against rubrics by an LLM judge) and `integration` (full pipeline, needs Azure
+OpenAI). Cases are parametrized from JSON in `tests/datasets/`.
+
+Two seams cover the Remote MCP Server: `POST /mcp` through a FastAPI `TestClient`
+(protocol, auth, orchestration, formatting, and both the JSON and SSE-progress response
+shapes) and the PII Sanitizer module on its own, because a silent failure there leaks
+customer data into a user's Claude context. `tests/CLAUDE.md` has the full layout and the
+conventions new tests should follow.
+
 ## Configuration Reference
 
 ### Environment Variables
@@ -558,6 +607,7 @@ def _get_llm(self) -> AzureChatOpenAI:
 | `AZURE_OPENAI_API_VERSION` | `2024-08-01-preview` | Azure API version |
 | `AZURE_OPENAI_LLM_DEPLOYMENT` | `gpt-5-nano` | Azure LLM deployment name |
 | `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` | `text-embedding-3-small` | Azure embeddings deployment (1536 dims) |
+| `AZURE_OPENAI_TEMPERATURE` | `1.0` | LLM temperature (`gpt-5-nano` supports 1.0 only) |
 | `JIRA_COLLECTION_NAME` | `JiraCollection` | Weaviate collection name |
 | `WEAVIATE_URL` | (from env) | Remote Weaviate URL, or `None` for local Docker |
 | `WEAVIATE_API_KEY` | (from env) | Remote Weaviate API key |

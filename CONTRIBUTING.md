@@ -6,6 +6,8 @@ This guide covers development setup, code patterns, and contribution guidelines 
 
 ### 1. Clone and Create Virtual Environment
 
+Python 3.10+ is required (`langchain` 1.x and `streamlit` 1.51 both floor there).
+
 ```bash
 git clone https://github.com/royho10/Jira-AI-Ticket-Solver.git
 cd Jira-AI-Ticket-Solver
@@ -90,6 +92,7 @@ AZURE_OPENAI_API_KEY = os.environ.get("AZURE_OPENAI_API_KEY")
 AZURE_OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-08-01-preview")
 AZURE_OPENAI_LLM_DEPLOYMENT = os.environ.get("AZURE_OPENAI_LLM_DEPLOYMENT", "gpt-5-nano")
 AZURE_OPENAI_EMBEDDING_DEPLOYMENT = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-small")
+AZURE_OPENAI_TEMPERATURE = 1.0  # gpt-5-nano only supports 1.0
 
 # Weaviate Configuration
 JIRA_COLLECTION_NAME = "JiraCollection"
@@ -105,12 +108,17 @@ MCP_SSE_STREAM_SECONDS = float(os.environ.get("MCP_SSE_STREAM_SECONDS", "300"))
 # Generic Limits
 MAX_EMBEDDINGS_INPUT_CHARS = 4000
 LLM_CALL_TIMEOUT_SECONDS = 60
+
+# Reranking
+RERANK_SCORE_THRESHOLD = 5
+MAX_SIMILAR_TICKETS_AFTER_RERANK = 5
 ```
 
 **Guidelines:**
 - Only shared/generic constants go in `settings.py`
 - Module-specific constants stay in their respective files
-- Environment variables are loaded via `python-dotenv`
+- `settings.py` calls `load_dotenv()` at import, so importing it is enough to see `.env`
+  from any entry point (Streamlit, the MCP server, the indexer, pytest)
 
 ## Running Locally
 
@@ -254,6 +262,31 @@ for attachment in attachments:
 
 ## Testing Changes
 
+### Automated Tests
+
+Three tiers, selected by pytest marker (`pytest.ini`). Only the first is free:
+
+```bash
+./run_tests.sh deterministic   # no LLM calls, safe for CI
+./run_tests.sh llm             # real LLM calls, needs Azure OpenAI
+./run_tests.sh integration     # full pipeline, needs Azure OpenAI
+./run_tests.sh all             # every tier in sequence
+
+python -m pytest -m deterministic -v          # same thing, directly
+python -m pytest tests/unit/test_mcp_server.py -v
+```
+
+Read `tests/CLAUDE.md` before adding tests — it documents the layout, the two agreed MCP
+server seams and the conventions (dataset-driven parametrization, hand-written fakes over
+`MagicMock` for `create_app`, the secrets-must-not-leak assertion, covering both
+`tools/call` response shapes).
+
+Anything touching the server or the sanitizer should keep the deterministic tier green:
+
+```bash
+./run_tests.sh deterministic
+```
+
 ### Manual Testing Workflow
 
 1. **Test Indexer:**
@@ -280,10 +313,13 @@ for attachment in attachments:
 
 ### Checking Weaviate Data
 
-```python
-import weaviate
+Go through the shared helper so you inspect the same instance the app uses — local Docker
+when `WEAVIATE_URL` is unset, the configured remote when it is set:
 
-client = weaviate.connect_to_local()
+```python
+from utils.weaviate_client import connect_to_weaviate
+
+client = connect_to_weaviate()
 collection = client.collections.get("JiraCollection")
 
 # Count objects
@@ -345,10 +381,12 @@ def extract_content_from_zip(
 
 ### Before Submitting
 
-1. **Test your changes** locally with the chatbot interface
-2. **Verify no regressions** in existing functionality
-3. **Update documentation** if adding new features or changing behavior
-4. **Check for hardcoded values** - use `config/settings.py` for shared constants
+1. **Run the deterministic tier** - `./run_tests.sh deterministic` must be green
+2. **Test your changes** locally with the chatbot interface, the MCP server, or both,
+   depending on what you touched
+3. **Verify no regressions** in existing functionality
+4. **Update documentation** if adding new features or changing behavior
+5. **Check for hardcoded values** - use `config/settings.py` for shared constants
 
 ### PR Description Template
 
@@ -407,17 +445,27 @@ class NewOutputModel(BaseModel):
 
 ```python
 # To delete existing collection (in Python REPL)
-import weaviate
-client = weaviate.connect_to_local()
+from utils.weaviate_client import connect_to_weaviate
+client = connect_to_weaviate()
 client.collections.delete("JiraCollection")
 client.close()
 ```
 
+### Adding a Field to `TicketAnalysis`
+
+A new free-text field on `TicketAnalysis` (or on `SimilarTicket` / `ErrorLogHighlight`)
+has to be classified in `core/pii_sanitizer.py`: add it to the sanitized tuples if it can
+carry customer data, or to the structural tuples if it must survive character-for-character
+(keys, statuses, timestamps, scores). The coverage test in
+`tests/unit/test_pii_sanitizer.py` fails on any string field that is in neither, so an
+unredacted field cannot ship silently. Then extend `server/response_formatter.py` if the
+field should reach Claude.
+
 ### Updating Environment Variables
 
 1. Add to `.env.example` with placeholder value
-2. Load in relevant module with `os.environ.get()` or `os.environ[]`
-3. Document in README.md
+2. Read it in `config/settings.py` if it is shared, otherwise in the owning module
+3. Document it in the README and in the ARCHITECTURE.md environment variable table
 
 ## Troubleshooting
 

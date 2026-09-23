@@ -50,7 +50,9 @@ TOOL_DEFINITION = {
         "Analyze a Jira ticket: summarize it, extract errors from attached logs and "
         "images, hypothesize root causes, suggest solutions, and surface similar "
         "historical tickets. Customer-identifying information is redacted before the "
-        "result is returned."
+        "result is returned. Returns a finished, user-facing report that must be "
+        "relayed to the user verbatim, not summarized -- see the instructions at the "
+        "top of the result."
     ),
     "inputSchema": {
         "type": "object",
